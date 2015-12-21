@@ -7,7 +7,10 @@
         GF_DEFRAG_CMD_START_TIER,
         GF_DEFRAG_CMD_STATUS_TIER,
         GF_DEFRAG_CMD_START_DETACH_TIER,
-        GF_DEFRAG_CMD_STOP_DETACH_TIER
+        GF_DEFRAG_CMD_STOP_DETACH_TIER,
+        GF_DEFRAG_CMD_PAUSE_TIER,
+        GF_DEFRAG_CMD_RESUME_TIER,
+        GF_DEFRAG_CMD_DETACH_STATUS
 };
 
  enum gf_defrag_status_t {
@@ -41,6 +44,7 @@ enum gf_bitrot_type {
         GF_BITROT_OPTION_TYPE_SCRUB_FREQ,
         GF_BITROT_OPTION_TYPE_SCRUB,
         GF_BITROT_OPTION_TYPE_EXPIRY_TIME,
+        GF_BITROT_CMD_SCRUB_STATUS,
         GF_BITROT_OPTION_TYPE_MAX
 };
 
@@ -189,13 +193,15 @@ enum gf1_cli_snapshot_config {
 enum  gf1_cli_snapshot_status {
         GF_SNAP_STATUS_TYPE_ALL = 0,
         GF_SNAP_STATUS_TYPE_SNAP,
-        GF_SNAP_STATUS_TYPE_VOL
+        GF_SNAP_STATUS_TYPE_VOL,
+        GF_SNAP_STATUS_TYPE_ITER
 };
 
 enum gf1_cli_snapshot_delete {
         GF_SNAP_DELETE_TYPE_ALL  = 0,
         GF_SNAP_DELETE_TYPE_SNAP = 1,
-        GF_SNAP_DELETE_TYPE_VOL  = 2
+        GF_SNAP_DELETE_TYPE_VOL  = 2,
+        GF_SNAP_DELETE_TYPE_ITER = 3
 };
 
 struct gf_cli_req {

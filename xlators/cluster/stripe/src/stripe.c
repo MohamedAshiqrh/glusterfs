@@ -4464,7 +4464,7 @@ stripe_is_bd (dict_t *this, char *key, data_t *value, void *data)
         return 0;
 }
 
-static inline gf_boolean_t
+static gf_boolean_t
 stripe_setxattr_is_bd (dict_t *dict)
 {
         gf_boolean_t is_bd = _gf_false;
@@ -4633,7 +4633,7 @@ out:
         return ret;
 }
 
-static inline gf_boolean_t
+static gf_boolean_t
 stripe_fsetxattr_is_special (dict_t *dict)
 {
         gf_boolean_t is_spl = _gf_false;
@@ -5515,8 +5515,8 @@ stripe_getxattr (call_frame_t *frame, xlator_t *this,
         loc_copy (&local->loc, loc);
 
 
-        if (name && strncmp (name, GF_XATTR_QUOTA_SIZE_KEY,
-                             strlen (GF_XATTR_QUOTA_SIZE_KEY)) == 0) {
+        if (name && strncmp (name, QUOTA_SIZE_KEY,
+                             strlen (QUOTA_SIZE_KEY)) == 0) {
                 local->wind_count = priv->child_count;
 
                 for (i = 0, trav=this->children; i < priv->child_count; i++,
@@ -5574,7 +5574,7 @@ err:
         return 0;
 }
 
-static inline gf_boolean_t
+static gf_boolean_t
 stripe_is_special_xattr (const char *name)
 {
         gf_boolean_t    is_spl = _gf_false;

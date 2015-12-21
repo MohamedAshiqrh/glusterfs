@@ -183,6 +183,7 @@ enum gluster_cli_procnum {
         GLUSTER_CLI_BITROT,
         GLUSTER_CLI_ATTACH_TIER,
         GLUSTER_CLI_DETACH_TIER,
+        GLUSTER_CLI_TIER,
         GLUSTER_CLI_MAXVALUE,
 };
 
@@ -216,6 +217,7 @@ enum glusterd_brick_procnum {
         GLUSTERD_NODE_STATUS,
         GLUSTERD_VOLUME_BARRIER_OP,
         GLUSTERD_BRICK_BARRIER,
+        GLUSTERD_NODE_BITROT,
         GLUSTERD_BRICK_MAXVALUE,
 };
 

@@ -124,7 +124,7 @@ out:
 
 /*Internal Function:
  * Delete connection node from the list*/
-static inline int
+static int
 delete_conn_node (gfdb_conn_node_t *_conn_node)
 {
         int ret = -1;
@@ -236,7 +236,7 @@ init_db (dict_t *args, gfdb_db_type_t gfdb_db_type)
         if (!_conn_node) {
                 gf_msg (GFDB_DATA_STORE, GF_LOG_ERROR, ENOMEM,
                         LG_MSG_NO_MEMORY, "Failed mem alloc for "
-                        "gfdb_conn_node_t!");
+                        "gfdb_conn_node_t");
                 goto alloc_failed;
         }
 
@@ -382,9 +382,10 @@ insert_record (gfdb_conn_node_t *_conn_node,
                 ret = db_operations_t->insert_record_op (gf_db_connection,
                                                         gfdb_db_record);
                 if (ret) {
-                        gf_msg (GFDB_DATA_STORE, GF_LOG_ERROR, 0,
+                        gf_msg (GFDB_DATA_STORE, _gfdb_log_level (GF_LOG_ERROR,
+                                gfdb_db_record->ignore_errors), 0,
                                 LG_MSG_INSERT_OR_UPDATE_FAILED, "Insert/Update"
-                                " operation failed!");
+                                " operation failed");
                 }
         }
 
@@ -424,7 +425,7 @@ delete_record (gfdb_conn_node_t *_conn_node,
                 if (ret) {
                         gf_msg (GFDB_DATA_STORE, GF_LOG_ERROR, 0,
                                 LG_MSG_DELETE_FAILED, "Delete operation "
-                                "failed!");
+                                "failed");
                 }
 
         }
@@ -464,7 +465,7 @@ find_all(gfdb_conn_node_t *_conn_node, gf_query_callback_t query_callback,
                 if (ret) {
                         gf_msg (GFDB_DATA_STORE, GF_LOG_ERROR, 0,
                                 LG_MSG_FIND_OP_FAILED, "Find all operation "
-                                "failed!");
+                                "failed");
                 }
 
         }
@@ -511,7 +512,7 @@ find_unchanged_for_time(gfdb_conn_node_t *_conn_node,
                 if (ret) {
                         gf_msg (GFDB_DATA_STORE, GF_LOG_ERROR, 0,
                                 LG_MSG_FIND_OP_FAILED, "Find unchanged "
-                                "operation failed!");
+                                "operation failed");
                 }
 
         }
@@ -556,7 +557,7 @@ find_recently_changed_files(gfdb_conn_node_t *_conn_node,
                 if (ret) {
                         gf_msg (GFDB_DATA_STORE, GF_LOG_ERROR, 0,
                                 LG_MSG_FIND_OP_FAILED,
-                                "Find changed operation failed!");
+                                "Find changed operation failed");
                 }
 
         }
@@ -613,7 +614,7 @@ find_unchanged_for_time_freq(gfdb_conn_node_t *_conn_node,
                 if (ret) {
                         gf_msg (GFDB_DATA_STORE, GF_LOG_ERROR, 0,
                                 LG_MSG_FIND_OP_FAILED,
-                                "Find unchanged with freq operation failed!");
+                                "Find unchanged with freq operation failed");
                 }
 
         }
@@ -669,13 +670,118 @@ find_recently_changed_files_freq(gfdb_conn_node_t *_conn_node,
                 if (ret) {
                         gf_msg (GFDB_DATA_STORE, GF_LOG_ERROR, 0,
                                 LG_MSG_FIND_OP_FAILED,
-                                "Find changed with freq operation failed!");
+                                "Find changed with freq operation failed");
                 }
 
         }
 
         return ret;
 
+}
+
+
+
+/*Libgfdb API Function: Clear the heat for all the files
+ *
+ *  Arguments:
+ *    conn_node              : GFDB Connection node
+ *
+ * Returns : if successful return 0 or
+ *           -ve value in case of failure
+ **/
+
+int
+clear_files_heat (gfdb_conn_node_t *conn_node) {
+        int ret = 0;
+        gfdb_db_operations_t *db_operations   = NULL;
+        void *gf_db_connection                  = NULL;
+
+        CHECK_CONN_NODE(conn_node);
+
+        db_operations = &conn_node->gfdb_connection.gfdb_db_operations;
+        gf_db_connection = conn_node->gfdb_connection.gf_db_connection;
+
+        if (db_operations->clear_files_heat_op) {
+                ret =  db_operations->clear_files_heat_op (gf_db_connection);
+                if (ret) {
+                        gf_msg (GFDB_DATA_STORE, GF_LOG_ERROR, 0,
+                                LG_MSG_FIND_OP_FAILED,
+                                "Clear files heat operation failed");
+                }
+        }
+
+        return ret;
+}
+
+
+/* Libgfdb API Function: Function to extract version of the db
+ * Input:
+ * gfdb_conn_node_t *conn_node        : GFDB Connection node
+ * char **version  : the version is extracted as a string and will be stored in
+ *                   this variable. The freeing of the memory should be done by
+ *                   the caller.
+ * Return:
+ *      On success return the lenght of the version string that is
+ *      extracted.
+ *      On failure return -1
+ * */
+int
+get_db_version (gfdb_conn_node_t *conn_node, char **version)
+{
+        int ret = 0;
+        gfdb_db_operations_t *db_operations   = NULL;
+        void *gf_db_connection                  = NULL;
+
+        CHECK_CONN_NODE(conn_node);
+
+        db_operations = &conn_node->gfdb_connection.gfdb_db_operations;
+        gf_db_connection = conn_node->gfdb_connection.gf_db_connection;
+
+        if (db_operations->get_db_version) {
+                ret =  db_operations->get_db_version (gf_db_connection,
+                                                        version);
+                if (ret < 0) {
+                        gf_msg (GFDB_DATA_STORE, GF_LOG_ERROR, 0,
+                                LG_MSG_FIND_OP_FAILED,
+                                "Get version failed");
+                }
+        }
+
+        return ret;
+}
+
+int
+get_db_setting (gfdb_conn_node_t *conn_node, char *param_key,
+                char **param_value)
+{
+        int ret = -1;
+        gfdb_db_operations_t *db_operations   = NULL;
+        void *gf_db_connection                  = NULL;
+
+        CHECK_CONN_NODE(conn_node);
+
+        db_operations = &conn_node->gfdb_connection.gfdb_db_operations;
+        gf_db_connection = conn_node->gfdb_connection.gf_db_connection;
+
+        if (db_operations->get_db_setting) {
+                ret =  db_operations->get_db_setting (gf_db_connection,
+                                                        param_key, param_value);
+                if (ret < 0) {
+                        gf_msg (GFDB_DATA_STORE, GF_LOG_ERROR, 0,
+                                LG_MSG_FIND_OP_FAILED,
+                                "Get setting failed");
+                }
+        }
+
+        return ret;
+}
+
+
+
+static const
+char *get_db_path_key()
+{
+        return GFDB_SQL_PARAM_DBPATH;
 }
 
 void get_gfdb_methods (gfdb_methods_t *methods)
@@ -685,6 +791,22 @@ void get_gfdb_methods (gfdb_methods_t *methods)
         methods->find_unchanged_for_time = find_unchanged_for_time;
         methods->find_recently_changed_files = find_recently_changed_files;
         methods->find_unchanged_for_time_freq = find_unchanged_for_time_freq;
-        methods->find_recently_changed_files_freq = find_recently_changed_files_freq;
-        methods->dbpath = strdup(GFDB_SQL_PARAM_DBPATH);
+        methods->find_recently_changed_files_freq =
+                                               find_recently_changed_files_freq;
+        methods->clear_files_heat = clear_files_heat;
+        methods->get_db_version = get_db_version;
+        methods->get_db_setting = get_db_setting;
+        methods->get_db_path_key = get_db_path_key;
+
+        /* Query Record related functions */
+        methods->gfdb_query_record_new = gfdb_query_record_new;
+        methods->gfdb_query_record_free = gfdb_query_record_free;
+        methods->gfdb_add_link_to_query_record = gfdb_add_link_to_query_record;
+        methods->gfdb_write_query_record = gfdb_write_query_record;
+        methods->gfdb_read_query_record = gfdb_read_query_record;
+
+        /* Link info related functions */
+        methods->gfdb_link_info_new = gfdb_link_info_new;
+        methods->gfdb_link_info_free = gfdb_link_info_free;
 }
+

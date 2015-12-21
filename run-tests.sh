@@ -164,8 +164,7 @@ function run_tests()
         return $match
     }
     RES=0
-    for t in $(find ${regression_testsdir}/tests | grep -v geo-rep \
-    | LC_COLLATE=C sort) ; do
+    for t in $(find ${regression_testsdir}/tests | LC_COLLATE=C sort) ; do
         if match $t "$@" ; then
             if [ -d $t ] ; then
                 echo "Running tests in directory $t"
@@ -195,7 +194,26 @@ function is_bad_test ()
 {
     local name=$1
     for bt in ./tests/basic/quota-anon-fd-nfs.t \
-	      ; do
+              ./tests/bugs/quota/bug-1235182.t \
+              ./tests/basic/quota-nfs.t \
+              ./tests/basic/tier/tier_lookup_heal.t \
+              ./tests/basic/tier/bug-1214222-directories_missing_after_attach_tier.t \
+              ./tests/basic/tier/fops-during-migration.t \
+              ./tests/basic/tier/record-metadata-heat.t \
+              ./tests/bugs/snapshot/bug-1109889.t \
+              ./tests/bugs/distribute/bug-1066798.t \
+              ./tests/bugs/glusterd/bug-1238706-daemons-stop-on-peer-cleanup.t \
+              ./tests/geo-rep/georep-basic-dr-rsync.t \
+              ./tests/geo-rep/georep-basic-dr-tarssh.t \
+              ./tests/bugs/replicate/bug-1221481-allow-fops-on-dir-split-brain.t \
+              ./tests/bugs/fuse/bug-924726.t \
+              ./tests/basic/afr/split-brain-healing.t \
+              ./tests/basic/afr/sparse-file-self-heal.t \
+              ./tests/basic/afr/replace-brick-self-heal.t \
+              ./tests/bugs/snapshot/bug-1140162-file-snapshot-features-encrypt-opts-validation.t \
+              ./tests/bugs/tier/bug-1286974.t \
+              ./tests/features/weighted-rebalance.t \
+              ; do
         [ x"$name" = x"$bt" ] && return 0 # bash: zero means true/success
     done
     return 1				  # bash: non-zero means false/failure
@@ -204,12 +222,11 @@ function is_bad_test ()
 function run_all ()
 {
     find ${regression_testsdir}/tests -name '*.t' \
-    | grep -v geo-rep \
     | LC_COLLATE=C sort \
     | while read t; do
 	old_cores=$(ls /core.* 2> /dev/null | wc -l)
         retval=0
-        prove -f --timer $t
+        prove -mf --timer $t
         TMP_RES=$?
         if [ ${TMP_RES} -ne 0 ] ; then
             echo "$t: bad status $TMP_RES"
@@ -224,7 +241,14 @@ function run_all ()
         if [ $retval -ne 0 ]; then
 	    if is_bad_test $t; then
 		echo  "Ignoring failure from known-bad test $t"
-	    else
+	        retval=0
+            else
+                echo
+                echo "Running failed test $t in debug mode"
+                echo "Just for debug data, does not change test result"
+                echo
+                bash -x $t
+                echo
 		return $retval
 	    fi
         fi

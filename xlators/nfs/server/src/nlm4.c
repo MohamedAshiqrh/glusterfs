@@ -15,6 +15,7 @@
 #include "nfs.h"
 #include "mem-pool.h"
 #include "logging.h"
+#include "syscall.h"
 #include "nfs-fops.h"
 #include "inode.h"
 #include "mount3.h"
@@ -1050,7 +1051,7 @@ nlm4_establish_callback (void *csarg)
         }
 
         /* TODO: is 32 frames in transit enough ? */
-        rpc_clnt = rpc_clnt_new (options, cs->nfsx->ctx, "NLM-client", 32);
+        rpc_clnt = rpc_clnt_new (options, cs->nfsx, "NLM-client", 32);
         if (rpc_clnt == NULL) {
                 gf_msg (GF_NLM, GF_LOG_ERROR, EINVAL, NFS_MSG_INVALID_ENTRY,
                         "rpc_clnt NULL");
@@ -2505,7 +2506,7 @@ nlm4svc_init(xlator_t *nfsx)
            instead. This is still a theory but we need to thoroughly test it
            out. Until then NLM support is non-existent on OSX.
         */
-        ret = unlink (GF_SM_NOTIFY_PIDFILE);
+        ret = sys_unlink (GF_SM_NOTIFY_PIDFILE);
         if (ret == -1 && errno != ENOENT) {
                 gf_msg (GF_NLM, GF_LOG_ERROR, errno, NFS_MSG_UNLINK_ERROR,
                         "unable to unlink %s: %d",
@@ -2542,7 +2543,7 @@ nlm4svc_init(xlator_t *nfsx)
                 ret = runcmd (KILLALL_CMD, "-9", "rpc.statd", NULL);
         }
 
-        ret = unlink (GF_RPC_STATD_PIDFILE);
+        ret = sys_unlink (GF_RPC_STATD_PIDFILE);
         if (ret == -1 && errno != ENOENT) {
                 gf_msg (GF_NLM, GF_LOG_ERROR, errno, NFS_MSG_UNLINK_ERROR,
                         "unable to unlink %s", pid_file);

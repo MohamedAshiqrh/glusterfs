@@ -40,8 +40,14 @@
 #define AUTH_REJECT_OPT_KEY "auth.addr.*.reject"
 #define NFS_DISABLE_OPT_KEY "nfs.*.disable"
 
+#define SSL_OWN_CERT_OPT    "ssl.own-cert"
+#define SSL_PRIVATE_KEY_OPT "ssl.private-key"
+#define SSL_CA_LIST_OPT     "ssl.ca-list"
+#define SSL_CRL_PATH_OPT    "ssl.crl-path"
 #define SSL_CERT_DEPTH_OPT  "ssl.certificate-depth"
 #define SSL_CIPHER_LIST_OPT "ssl.cipher-list"
+#define SSL_DH_PARAM_OPT    "ssl.dh-param"
+#define SSL_EC_CURVE_OPT    "ssl.ec-curve"
 
 
 typedef enum {
@@ -54,6 +60,9 @@ struct volgen_graph {
         glusterfs_graph_t graph;
 };
 typedef struct volgen_graph volgen_graph_t;
+
+typedef int (*glusterd_graph_builder_t) (volgen_graph_t *graph,
+                                         dict_t *mod_dict);
 
 #define COMPLETE_OPTION(key, completion, ret)                           \
         do {                                                            \
@@ -83,6 +92,7 @@ typedef enum gd_volopt_flags_ {
         OPT_FLAG_FORCE = 0x01,      // option needs force to be reset
         OPT_FLAG_XLATOR_OPT = 0x02, // option enables/disables xlators
         OPT_FLAG_CLIENT_OPT = 0x04, // option affects clients
+        OPT_FLAG_NEVER_RESET = 0x08, /* option which should not be reset */
 } gd_volopt_flags_t;
 
 typedef enum {
@@ -153,8 +163,7 @@ glusterd_snapdsvc_generate_volfile (volgen_graph_t *graph,
                                     glusterd_volinfo_t *volinfo);
 
 int
-glusterd_create_global_volfile (int (*builder) (volgen_graph_t *graph,
-                                                dict_t *set_dict),
+glusterd_create_global_volfile (glusterd_graph_builder_t builder,
                                 char *filepath, dict_t  *mod_dict);
 
 int
@@ -257,12 +266,6 @@ end_sethelp_xml_doc (xmlTextWriterPtr writer);
 char*
 glusterd_get_trans_type_rb (gf_transport_type ttype);
 
-int
-glusterd_check_nfs_volfile_identical (gf_boolean_t *identical);
-
-int
-glusterd_check_nfs_topology_identical (gf_boolean_t *identical);
-
 uint32_t
 glusterd_get_op_version_for_key (char *key);
 
@@ -277,11 +280,12 @@ gd_is_boolean_option (char *key);
 
 
 char*
-volgen_get_shd_key (glusterd_volinfo_t *volinfo);
+volgen_get_shd_key (int type);
 
 int
 glusterd_volopt_validate (glusterd_volinfo_t *volinfo, dict_t *dict, char *key,
                           char *value, char **op_errstr);
-
+gf_boolean_t
+gd_is_self_heal_enabled (glusterd_volinfo_t *volinfo, dict_t *dict);
 
 #endif

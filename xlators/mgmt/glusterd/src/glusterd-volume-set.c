@@ -12,6 +12,280 @@
 #include "glusterd-utils.h"
 
 static int
+get_tier_freq_threshold (glusterd_volinfo_t *volinfo, char *threshold_key) {
+        int     threshold       = 0;
+        char    *str_thresold   = NULL;
+        int     ret             = -1;
+        xlator_t *this          = NULL;
+
+        this = THIS;
+        GF_ASSERT (this);
+
+        glusterd_volinfo_get (volinfo, threshold_key, &str_thresold);
+        if (str_thresold) {
+                ret = gf_string2int (str_thresold, &threshold);
+                if (ret == -1) {
+                        threshold = ret;
+                        gf_msg (this->name, GF_LOG_ERROR, EINVAL,
+                        GD_MSG_INCOMPATIBLE_VALUE, "Failed to convert "
+                        "string to integer");
+                }
+        }
+
+        return threshold;
+}
+
+/*
+ * Validation function for record-counters
+ * if write-freq-threshold and read-freq-threshold both have non-zero values
+ * record-counters cannot be set to off
+ * if record-counters is set to on
+ * check if both the frequency thresholds are zero, then pop
+ * a note, but volume set is not failed.
+ * */
+static int
+validate_tier_counters (glusterd_volinfo_t      *volinfo,
+                        dict_t                  *dict,
+                        char                    *key,
+                        char                    *value,
+                        char                    **op_errstr) {
+
+        char            errstr[2048]    = "";
+        int             ret             = -1;
+        xlator_t        *this           = NULL;
+        gf_boolean_t    origin_val      = -1;
+        int             current_wt      = 0;
+        int             current_rt      = 0;
+
+        this = THIS;
+        GF_ASSERT (this);
+
+        if (volinfo->type != GF_CLUSTER_TYPE_TIER) {
+                snprintf (errstr, sizeof (errstr), "Volume %s is not a tier "
+                          "volume. Option %s is only valid for tier volume.",
+                          volinfo->volname, key);
+                goto out;
+        }
+
+        ret = gf_string2boolean (value, &origin_val);
+        if (ret) {
+                snprintf (errstr, sizeof (errstr), "%s is not a compatible "
+                          "value. %s expects an boolean value", value, key);
+                goto out;
+        }
+
+        current_rt = get_tier_freq_threshold (volinfo,
+                                                "cluster.read-freq-threshold");
+        if (current_rt == -1) {
+                snprintf (errstr, sizeof (errstr), " Failed to retrive value of"
+                        "cluster.read-freq-threshold");
+                goto out;
+        }
+        current_wt = get_tier_freq_threshold (volinfo,
+                                                "cluster.write-freq-threshold");
+        if (current_wt == -1) {
+                snprintf (errstr, sizeof (errstr), " Failed to retrive value of"
+                        "cluster.write-freq-threshold");
+                goto out;
+        }
+        /* If record-counters is set to off */
+        if (!origin_val) {
+
+                /* Both the thresholds should be zero to set
+                 * record-counters to off*/
+                if (current_rt || current_wt) {
+                        snprintf (errstr, sizeof (errstr),
+                                "Cannot set features.record-counters to \"%s\""
+                                " as cluster.write-freq-threshold is %d"
+                                " and cluster.read-freq-threshold is %d. Please"
+                                " set both cluster.write-freq-threshold and "
+                                " cluster.read-freq-threshold to 0, to set "
+                                " features.record-counters to \"%s\".",
+                                value, current_wt, current_rt, value);
+                        ret = -1;
+                        goto out;
+                }
+        }
+        /* TODO give a warning message to the user. errstr without re = -1 will
+         * not result in a warning on cli for now.
+        else {
+                if (!current_rt && !current_wt) {
+                        snprintf (errstr, sizeof (errstr),
+                                " Note : cluster.write-freq-threshold is %d"
+                                " and cluster.read-freq-threshold is %d. Please"
+                                " set both cluster.write-freq-threshold and "
+                                " cluster.read-freq-threshold to"
+                                " appropriate positive values.",
+                                current_wt, current_rt);
+                }
+        }*/
+
+        ret = 0;
+out:
+
+        if (ret) {
+                gf_msg (this->name, GF_LOG_ERROR, EINVAL,
+                        GD_MSG_INCOMPATIBLE_VALUE, "%s", errstr);
+                *op_errstr = gf_strdup (errstr);
+        }
+
+        return ret;
+
+}
+
+/* Validation for tiering frequency thresholds
+ * If any of the frequency thresholds are set to a non-zero value,
+ * switch record-counters on, if not already on
+ * If both the frequency thresholds are set to zero,
+ * switch record-counters off, if not already off
+ * */
+static int
+validate_tier_thresholds (glusterd_volinfo_t    *volinfo,
+                          dict_t                *dict,
+                          char                  *key,
+                          char                  *value,
+                          char                  **op_errstr)
+{
+        char            errstr[2048]    = "";
+        int             ret             = -1;
+        xlator_t        *this           = NULL;
+        int             origin_val      = -1;
+        gf_boolean_t    current_rc      = _gf_false;
+        char            *str_current_rc = NULL;
+        int             current_wt      = 0;
+        int             current_rt      = 0;
+        char            *str_current_wt = NULL;
+        char            *str_current_rt = NULL;
+        gf_boolean_t    is_set_rc       = _gf_false;
+        char            *proposed_rc    = NULL;
+        gf_boolean_t    is_set_wrt_thsd = _gf_false;
+
+
+        this = THIS;
+        GF_ASSERT (this);
+
+        if (volinfo->type != GF_CLUSTER_TYPE_TIER) {
+                snprintf (errstr, sizeof (errstr), "Volume %s is not a tier "
+                          "volume. Option %s is only valid for tier volume.",
+                          volinfo->volname, key);
+                goto out;
+        }
+
+
+        ret = gf_string2int (value, &origin_val);
+        if (ret) {
+                snprintf (errstr, sizeof (errstr), "%s is not a compatible "
+                          "value. %s expects an integer value.", value, key);
+                ret = -1;
+                goto out;
+        }
+
+        if (origin_val < 0) {
+                snprintf (errstr, sizeof (errstr), "%s is not a "
+                          "compatible value. %s expects a positive"
+                          "integer value.", value, key);
+                ret = -1;
+                goto out;
+        }
+
+        /* Get the record-counters value */
+        ret = glusterd_volinfo_get_boolean (volinfo,
+                                        "features.record-counters");
+        if (ret == -1) {
+                snprintf (errstr, sizeof (errstr), "Failed to retrive value of"
+                        "features.record-counters from volume info");
+                goto out;
+        }
+        current_rc = ret;
+
+        /* if any of the thresholds are set to a non-zero value
+         * switch record-counters on, if not already on*/
+        if (origin_val > 0) {
+                if (!current_rc) {
+                        is_set_rc = _gf_true;
+                        current_rc = _gf_true;
+                }
+        } else {
+                /* if the set is for write-freq-threshold */
+                if (strstr (key, "write-freq-threshold")) {
+                        current_rt = get_tier_freq_threshold (volinfo,
+                                              "cluster.read-freq-threshold");
+                         if (current_rt == -1) {
+                                snprintf (errstr, sizeof (errstr),
+                                        " Failed to retrive value of"
+                                        "cluster.read-freq-threshold");
+                                goto out;
+                         }
+                        current_wt = origin_val;
+                }
+                /* else it should be read-freq-threshold */
+                else {
+                        current_wt = get_tier_freq_threshold  (volinfo,
+                                              "cluster.write-freq-threshold");
+                         if (current_wt == -1) {
+                                snprintf (errstr, sizeof (errstr),
+                                        " Failed to retrive value of"
+                                        "cluster.write-freq-threshold");
+                                goto out;
+                         }
+                        current_rt = origin_val;
+                }
+
+                /* Since both the thresholds are zero, set record-counters
+                 * to off, if not already off */
+                if (current_rt == 0 && current_wt == 0) {
+                        if (current_rc) {
+                                is_set_rc = _gf_true;
+                                current_rc = _gf_false;
+                        }
+                }
+        }
+
+        /* if record-counter has to be set to proposed value */
+        if (is_set_rc) {
+                if (current_rc) {
+                        ret = gf_asprintf (&proposed_rc, "on");
+                } else {
+                        ret = gf_asprintf (&proposed_rc, "off");
+                }
+                if (ret < 0) {
+                        gf_msg (this->name, GF_LOG_ERROR, EINVAL,
+                                GD_MSG_INCOMPATIBLE_VALUE,
+                                "Failed to allocate memory to dict_value");
+                        goto error;
+                }
+                ret = dict_set_str (volinfo->dict, "features.record-counters",
+                                proposed_rc);
+error:
+                if (ret) {
+                        snprintf (errstr, sizeof (errstr),
+                                "Failed to set features.record-counters"
+                                "to \"%s\" automatically."
+                                "Please try to set features.record-counters "
+                                "\"%s\" manually. The options "
+                                "cluster.write-freq-threshold and "
+                                "cluster.read-freq-threshold can only "
+                                "be set to a non zero value, if "
+                                "features.record-counters is "
+                                "set to \"on\".", proposed_rc, proposed_rc);
+                        goto out;
+                }
+        }
+        ret = 0;
+out:
+        if (ret) {
+                gf_msg (this->name, GF_LOG_ERROR, EINVAL,
+                        GD_MSG_INCOMPATIBLE_VALUE, "%s", errstr);
+                *op_errstr = gf_strdup (errstr);
+                if (proposed_rc)
+                        GF_FREE (proposed_rc);
+        }
+        return ret;
+}
+
+
+
+static int
 validate_tier (glusterd_volinfo_t *volinfo, dict_t *dict, char *key,
                char *value, char **op_errstr)
 {
@@ -19,6 +293,10 @@ validate_tier (glusterd_volinfo_t *volinfo, dict_t *dict, char *key,
         int                  ret           = 0;
         xlator_t            *this          = NULL;
         int                  origin_val    = -1;
+        char                *current_wm_hi = NULL;
+        char                *current_wm_low = NULL;
+        uint64_t             wm_hi = 0;
+        uint64_t             wm_low = 0;
 
         this = THIS;
         GF_ASSERT (this);
@@ -34,12 +312,27 @@ validate_tier (glusterd_volinfo_t *volinfo, dict_t *dict, char *key,
                 goto out;
         }
 
+        if (strstr (key, "cluster.tier-mode")) {
+                if (strcmp(value, "test") &&
+                    strcmp(value, "cache")) {
+                        ret = -1;
+                        goto out;
+                }
+                goto out;
+        } else if (strstr (key, "tier-pause")) {
+                if (strcmp(value, "off") &&
+                    strcmp(value, "on")) {
+                        ret = -1;
+                        goto out;
+                }
+                goto out;
+        }
+
         /*
-         * All the volume set options for tier are expecting a positive
+         * Rest of the volume set options for tier are expecting a positive
          * Integer. Change the function accordingly if this constraint is
          * changed.
          */
-
         ret = gf_string2int (value, &origin_val);
         if (ret) {
                 snprintf (errstr, sizeof (errstr), "%s is not a compatible "
@@ -52,12 +345,12 @@ validate_tier (glusterd_volinfo_t *volinfo, dict_t *dict, char *key,
                 goto out;
         }
 
-        if (strstr ("cluster.tier-promote-frequency", key) ||
-            strstr ("cluster.tier-demote-frequency", key)) {
-                if (origin_val < 1) {
+        if (strstr (key, "watermark-hi") ||
+            strstr (key, "watermark-low")) {
+                if ((origin_val < 1) || (origin_val > 99)) {
                         snprintf (errstr, sizeof (errstr), "%s is not a "
-                                  "compatible value. %s expects a positive "
-                                  "integer value.",
+                                  "compatible value. %s expects a "
+                                  "percentage from 1-99.",
                                   value, key);
                         gf_msg (this->name, GF_LOG_ERROR, EINVAL,
                                 GD_MSG_INCOMPATIBLE_VALUE, "%s", errstr);
@@ -65,20 +358,52 @@ validate_tier (glusterd_volinfo_t *volinfo, dict_t *dict, char *key,
                         ret = -1;
                         goto out;
                 }
-        } else {
-                if (origin_val < 0) {
-                        snprintf (errstr, sizeof (errstr), "%s is not a "
-                                   "compatible value. %s expects a non-negative"
-                                   " integer value.",
-                                   value, key);
-                         gf_msg (this->name, GF_LOG_ERROR, EINVAL,
-                                GD_MSG_INCOMPATIBLE_VALUE,  "%s", errstr);
-                         *op_errstr = gf_strdup (errstr);
-                         ret = -1;
+
+                if (strstr (key, "watermark-hi")) {
+                        wm_hi = origin_val;
+                } else {
+                        glusterd_volinfo_get (volinfo,
+                                              "cluster.watermark-hi",
+                                              &current_wm_hi);
+                        gf_string2bytesize_uint64 (current_wm_hi,
+                                                   &wm_hi);
+                }
+
+                if (strstr (key, "watermark-low")) {
+                        wm_low = origin_val;
+                } else {
+                        glusterd_volinfo_get (volinfo,
+                                              "cluster.watermark-low",
+                                              &current_wm_low);
+                        gf_string2bytesize_uint64 (current_wm_low,
+                                                   &wm_low);
+                }
+                if (wm_low > wm_hi) {
+                        snprintf (errstr, sizeof (errstr), "lower watermark"
+                                  " cannot exceed upper watermark.");
+                        gf_msg (this->name, GF_LOG_ERROR, EINVAL,
+                                GD_MSG_INCOMPATIBLE_VALUE, "%s", errstr);
+                        *op_errstr = gf_strdup (errstr);
+                        ret = -1;
                         goto out;
                 }
-        }
+        } else if (strstr (key, "tier-promote-frequency") ||
+                   strstr (key, "tier-max-mb") ||
+                   strstr (key, "tier-max-files") ||
+                   strstr (key, "tier-demote-frequency")) {
+                if (origin_val < 1) {
+                        snprintf (errstr, sizeof (errstr), "%s is not a "
+                                  " compatible value. %s expects a positive "
+                                  "integer value greater than 0.",
+                                  value, key);
+                        gf_msg (this->name, GF_LOG_ERROR, EINVAL,
+                                GD_MSG_INCOMPATIBLE_VALUE, "%s", errstr);
+                        *op_errstr = gf_strdup (errstr);
+                        ret = -1;
+                        goto out;
+                }
 
+        }
 out:
         gf_msg_debug (this->name, 0, "Returning %d", ret);
 
@@ -271,6 +596,33 @@ out:
 }
 
 static int
+validate_replica (glusterd_volinfo_t *volinfo, dict_t *dict, char *key,
+                 char *value, char **op_errstr)
+{
+        char                 errstr[2048]  = "";
+        int                  ret           = 0;
+        xlator_t            *this          = NULL;
+
+        this = THIS;
+        GF_ASSERT (this);
+
+        if (volinfo->replica_count == 1) {
+                snprintf (errstr, sizeof (errstr),
+                          "Cannot set %s for a non-replicate volume.", key);
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        GD_MSG_VOL_NOT_REPLICA, "%s", errstr);
+                *op_errstr = gf_strdup (errstr);
+                ret = -1;
+                goto out;
+        }
+
+out:
+        gf_msg_debug (this->name, 0, "Returning %d", ret);
+
+        return ret;
+}
+
+static int
 validate_subvols_per_directory (glusterd_volinfo_t *volinfo, dict_t *dict,
                                 char *key, char *value, char **op_errstr)
 {
@@ -329,6 +681,16 @@ validate_disperse_heal_enable_disable (glusterd_volinfo_t *volinfo,
                                        char **op_errstr)
 {
         int                  ret = 0;
+        if (volinfo->type == GF_CLUSTER_TYPE_TIER) {
+               if (volinfo->tier_info.cold_type != GF_CLUSTER_TYPE_DISPERSE &&
+                   volinfo->tier_info.hot_type != GF_CLUSTER_TYPE_DISPERSE) {
+                        gf_asprintf (op_errstr, "Volume %s is not containing "
+                                     "disperse type", volinfo->volname);
+
+                       return -1;
+               } else
+                       return 0;
+        }
 
         if (volinfo->type != GF_CLUSTER_TYPE_DISPERSE) {
                 gf_asprintf (op_errstr, "Volume %s is not of disperse type",
@@ -536,20 +898,23 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .op_version = 1,
           .flags      = OPT_FLAG_CLIENT_OPT
         },
-        { .key        = "cluster.metadata-self-heal",
-          .voltype    = "cluster/replicate",
-          .op_version = 1,
-          .flags      = OPT_FLAG_CLIENT_OPT
+        { .key         = "cluster.metadata-self-heal",
+          .voltype     = "cluster/replicate",
+          .op_version  = 1,
+          .validate_fn = validate_replica,
+          .flags       = OPT_FLAG_CLIENT_OPT
         },
-        { .key        = "cluster.data-self-heal",
-          .voltype    = "cluster/replicate",
-          .op_version = 1,
-          .flags      = OPT_FLAG_CLIENT_OPT
+        { .key         = "cluster.data-self-heal",
+          .voltype     = "cluster/replicate",
+          .op_version  = 1,
+          .validate_fn = validate_replica,
+          .flags       = OPT_FLAG_CLIENT_OPT
         },
-        { .key        = "cluster.entry-self-heal",
-          .voltype    = "cluster/replicate",
-          .op_version = 1,
-          .flags      = OPT_FLAG_CLIENT_OPT
+        { .key         = "cluster.entry-self-heal",
+          .voltype     = "cluster/replicate",
+          .op_version  = 1,
+          .validate_fn = validate_replica,
+          .flags       = OPT_FLAG_CLIENT_OPT
         },
         { .key           = "cluster.self-heal-daemon",
           .voltype       = "cluster/replicate",
@@ -674,11 +1039,13 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         },
         { .key         = "diagnostics.brick-log-level",
           .voltype     = "debug/io-stats",
+          .value       = "INFO",
           .option      = "!brick-log-level",
           .op_version  = 1
         },
         { .key        = "diagnostics.client-log-level",
           .voltype    = "debug/io-stats",
+          .value      = "INFO",
           .option     = "!client-log-level",
           .op_version = 1,
           .flags      = OPT_FLAG_CLIENT_OPT
@@ -737,6 +1104,26 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .option     = "!log-flush-timeout",
           .op_version = GD_OP_VERSION_3_6_0,
           .flags      = OPT_FLAG_CLIENT_OPT
+        },
+        { .key         = "diagnostics.stats-dump-interval",
+          .voltype     = "debug/io-stats",
+          .option      = "ios-dump-interval",
+          .op_version  = 1
+        },
+        { .key         = "diagnostics.fop-sample-interval",
+          .voltype     = "debug/io-stats",
+          .option      = "ios-sample-interval",
+          .op_version  = 1
+        },
+        { .key         = "diagnostics.fop-sample-buf-size",
+          .voltype     = "debug/io-stats",
+          .option      = "ios-sample-buf-size",
+          .op_version  = 1
+        },
+        { .key         = "diagnostics.stats-dnscache-ttl-sec",
+          .voltype     = "debug/io-stats",
+          .option      = "ios-dnscache-ttl-sec",
+          .op_version  = 1
         },
 
         /* IO-cache xlator options */
@@ -1056,6 +1443,10 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .voltype     = "protocol/server",
           .op_version  = GD_OP_VERSION_3_6_0,
         },
+        { .key         = "server.dynamic-auth",
+          .voltype     = "protocol/server",
+          .op_version  = GD_OP_VERSION_3_7_5,
+        },
         { .key         = "client.send-gids",
           .voltype     = "protocol/client",
           .type        = NO_DOC,
@@ -1077,6 +1468,26 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         },
 
         /* Generic transport options */
+        { .key         = SSL_OWN_CERT_OPT,
+          .voltype     = "rpc-transport/socket",
+          .option      = "!ssl-own-cert",
+          .op_version  = GD_OP_VERSION_3_7_4,
+        },
+        { .key         = SSL_PRIVATE_KEY_OPT,
+          .voltype     = "rpc-transport/socket",
+          .option      = "!ssl-private-key",
+          .op_version  = GD_OP_VERSION_3_7_4,
+        },
+        { .key         = SSL_CA_LIST_OPT,
+          .voltype     = "rpc-transport/socket",
+          .option      = "!ssl-ca-list",
+          .op_version  = GD_OP_VERSION_3_7_4,
+        },
+        { .key         = SSL_CRL_PATH_OPT,
+          .voltype     = "rpc-transport/socket",
+          .option      = "!ssl-crl-path",
+          .op_version  = GD_OP_VERSION_3_7_4,
+        },
         { .key         = SSL_CERT_DEPTH_OPT,
           .voltype     = "rpc-transport/socket",
           .option      = "!ssl-cert-depth",
@@ -1086,6 +1497,16 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .voltype     = "rpc-transport/socket",
           .option      = "!ssl-cipher-list",
           .op_version  = GD_OP_VERSION_3_6_0,
+        },
+        { .key        = SSL_DH_PARAM_OPT,
+          .voltype     = "rpc-transport/socket",
+          .option     = "!ssl-dh-param",
+          .op_version = GD_OP_VERSION_3_7_4,
+        },
+        { .key        = SSL_EC_CURVE_OPT,
+          .voltype     = "rpc-transport/socket",
+          .option     = "!ssl-ec-curve",
+          .op_version = GD_OP_VERSION_3_7_4,
         },
 
         /* Performance xlators enable/disbable options */
@@ -1378,7 +1799,7 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .option      = "quota",
           .value       = "off",
           .type        = NO_DOC,
-          .flags       = OPT_FLAG_FORCE,
+          .flags       = OPT_FLAG_NEVER_RESET,
           .op_version  = 1
         },
         { .key         = VKEY_FEATURES_INODE_QUOTA,
@@ -1386,7 +1807,7 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .option      = "inode-quota",
           .value       = "off",
           .type        = NO_DOC,
-          .flags       = OPT_FLAG_FORCE,
+          .flags       = OPT_FLAG_NEVER_RESET,
           .op_version  = 1
         },
 
@@ -1729,13 +2150,13 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .op_version  = 3
         },
         { .key        = "config.memory-accounting",
-          .voltype    = "configuration",
+          .voltype    = "mgmt/glusterd",
           .option     = "!config",
           .op_version = 2,
           .flags      = OPT_FLAG_CLIENT_OPT
         },
         { .key         = "config.transport",
-          .voltype     = "configuration",
+          .voltype     = "mgmt/glusterd",
           .option      = "!config",
           .op_version  = 2
         },
@@ -1837,10 +2258,11 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         /* tier translator - global tunables */
         { .key         = "cluster.write-freq-threshold",
           .voltype     = "cluster/tier",
+          .value       = "0",
           .option      = "write-freq-threshold",
           .op_version  = GD_OP_VERSION_3_7_0,
           .flags       = OPT_FLAG_CLIENT_OPT,
-          .validate_fn = validate_tier,
+          .validate_fn = validate_tier_thresholds,
           .description = "Defines the number of writes, in a promotion/demotion"
                          " cycle, that would mark a file HOT for promotion. Any"
                          " file that has write hits less than this value will "
@@ -1848,34 +2270,93 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         },
         { .key         = "cluster.read-freq-threshold",
           .voltype     = "cluster/tier",
+          .value       = "0",
           .option      = "read-freq-threshold",
           .op_version  = GD_OP_VERSION_3_7_0,
           .flags       = OPT_FLAG_CLIENT_OPT,
-          .validate_fn = validate_tier,
+          .validate_fn = validate_tier_thresholds,
           .description = "Defines the number of reads, in a promotion/demotion "
                          "cycle, that would mark a file HOT for promotion. Any "
                          "file that has read hits less than this value will be "
                          "considered as COLD and will be demoted."
         },
+        { .key         = "cluster.tier-pause",
+          .voltype     = "cluster/tier",
+          .option      = "tier-pause",
+          .op_version  = GD_OP_VERSION_3_7_6,
+          .flags       = OPT_FLAG_CLIENT_OPT,
+          .validate_fn = validate_tier,
+        },
         { .key         = "cluster.tier-promote-frequency",
           .voltype     = "cluster/tier",
+          .value       = "120",
           .option      = "tier-promote-frequency",
           .op_version  = GD_OP_VERSION_3_7_0,
           .flags       = OPT_FLAG_CLIENT_OPT,
           .validate_fn = validate_tier,
-          .description = "Defines how often the promotion should be triggered "
-                         "i.e. periodicity of promotion cycles. The value is in "
-                         "secs."
         },
         { .key         = "cluster.tier-demote-frequency",
           .voltype     = "cluster/tier",
+          .value       = "120",
           .option      = "tier-demote-frequency",
           .op_version  = GD_OP_VERSION_3_7_0,
           .flags       = OPT_FLAG_CLIENT_OPT,
           .validate_fn = validate_tier,
-          .description = "Defines how often the demotion should be triggered "
-                         "i.e. periodicity of demotion cycles. The value is in "
-                         "secs."
+        },
+        { .key         = "cluster.watermark-hi",
+          .voltype     = "cluster/tier",
+          .value       = "90",
+          .option      = "watermark-hi",
+          .op_version  = GD_OP_VERSION_3_7_6,
+          .flags       = OPT_FLAG_CLIENT_OPT,
+          .validate_fn = validate_tier,
+          .description = "Upper % watermark for promotion. If hot tier fills"
+          " above this percentage, no promotion will happen and demotion will "
+          "happen with high probability."
+        },
+        { .key         = "cluster.watermark-low",
+          .voltype     = "cluster/tier",
+          .value       = "75",
+          .option      = "watermark-low",
+          .op_version  = GD_OP_VERSION_3_7_6,
+          .flags       = OPT_FLAG_CLIENT_OPT,
+          .validate_fn = validate_tier,
+          .description = "Lower % watermark. If hot tier is less "
+          "full than this, promotion will happen and demotion will not happen. "
+          "If greater than this, promotion/demotion will happen at a probability "
+          "relative to how full the hot tier is."
+        },
+        { .key         = "cluster.tier-mode",
+          .voltype     = "cluster/tier",
+          .option      = "tier-mode",
+          .value       = "cache",
+          .op_version  = GD_OP_VERSION_3_7_6,
+          .flags       = OPT_FLAG_CLIENT_OPT,
+          .validate_fn = validate_tier,
+          .description = "Either 'test' or 'cache'. Test mode periodically"
+          " demotes or promotes files automatically based on access."
+          " Cache mode does so based on whether the cache is full or not,"
+          " as specified with watermarks."
+        },
+        { .key         = "cluster.tier-max-mb",
+          .voltype     = "cluster/tier",
+          .option      = "tier-max-mb",
+          .value       = "10000",
+          .op_version  = GD_OP_VERSION_3_7_6,
+          .flags       = OPT_FLAG_CLIENT_OPT,
+          .validate_fn = validate_tier,
+          .description = "The maximum number of MB that may be migrated"
+          " in any direction in a given cycle by a single node."
+        },
+        { .key         = "cluster.tier-max-files",
+          .voltype     = "cluster/tier",
+          .option      = "tier-max-files",
+          .value       = "50000",
+          .op_version  = GD_OP_VERSION_3_7_6,
+          .flags       = OPT_FLAG_CLIENT_OPT,
+          .validate_fn = validate_tier,
+          .description = "The maximum number of files that may be migrated"
+          " in any direction in a given cycle by a single node."
         },
         { .key         = "features.ctr-enabled",
           .voltype     = "features/changetimerecorder",
@@ -1889,27 +2370,46 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .value       = "off",
           .option      = "record-counters",
           .op_version  = GD_OP_VERSION_3_7_0,
-          .description = "Its a Change Time Recorder Xlator option to enable recording write "
+          .validate_fn = validate_tier_counters,
+          .description = "Its a Change Time Recorder Xlator option to "
+                         "enable recording write "
                          "and read heat counters. The default is disabled. "
                          "If enabled, \"cluster.write-freq-threshold\" and "
                          "\"cluster.read-freq-threshold\" defined the number "
                          "of writes (or reads) to a given file are needed "
                          "before triggering migration."
         },
+        { .key         = "features.ctr-record-metadata-heat",
+          .voltype     = "features/changetimerecorder",
+          .value       = "off",
+          .option      = "ctr-record-metadata-heat",
+          .op_version  = GD_OP_VERSION_3_7_0,
+          .type        = NO_DOC,
+          .description = "Its a Change Time Recorder Xlator option to "
+                         "enable recording write heat on metadata of the file. "
+                         "The default is disabled. "
+                         "Metadata is inode atttributes like atime, mtime,"
+                         " permissions etc and "
+                         "extended attributes of a file ."
+        },
         { .key         = "features.ctr_link_consistency",
           .voltype     = "features/changetimerecorder",
           .value       = "off",
           .option      = "ctr_link_consistency",
           .op_version  = GD_OP_VERSION_3_7_0,
+          .type        = NO_DOC,
           .description = "Enable a crash consistent way of recording hardlink "
-                         "updates by Change Time Recorder Xlator. When recording in a crash "
-                         "consistent way the data operations will experience more latency."
+                         "updates by Change Time Recorder Xlator. "
+                         "When recording in a crash "
+                         "consistent way the data operations will "
+                         "experience more latency."
         },
-        { .key         = "features.ctr_hardlink_heal_expire_period",
+        { .key         = "features.ctr_lookupheal_link_timeout",
           .voltype     = "features/changetimerecorder",
           .value       = "300",
-          .option      = "ctr_hardlink_heal_expire_period",
+          .option      = "ctr_lookupheal_link_timeout",
           .op_version  = GD_OP_VERSION_3_7_2,
+          .type        = NO_DOC,
           .description = "Defines the expiry period of in-memory "
                          "hardlink of an inode,"
                          "used by lookup heal in Change Time Recorder."
@@ -1918,11 +2418,12 @@ struct volopt_map_entry glusterd_volopt_map[] = {
                          "hardlink is done and the "
                          "in-memory hardlink period is reset"
         },
-        { .key         = "features.ctr_inode_heal_expire_period",
+        { .key         = "features.ctr_lookupheal_inode_timeout",
           .voltype     = "features/changetimerecorder",
           .value       = "300",
-          .option      = "ctr_inode_heal_expire_period",
+          .option      = "ctr_lookupheal_inode_timeout",
           .op_version  = GD_OP_VERSION_3_7_2,
+          .type        = NO_DOC,
           .description = "Defines the expiry period of in-memory inode,"
                          "used by lookup heal in Change Time Recorder. "
                          "Once the expiry period"
@@ -2013,16 +2514,30 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         { .key         = "disperse.background-heals",
           .voltype     = "cluster/disperse",
           .op_version  = GD_OP_VERSION_3_7_3,
+          .flags       = OPT_FLAG_CLIENT_OPT
         },
         { .key         = "disperse.heal-wait-qlength",
           .voltype     = "cluster/disperse",
           .op_version  = GD_OP_VERSION_3_7_3,
+          .flags       = OPT_FLAG_CLIENT_OPT
         },
         { .key        = "cluster.heal-timeout",
           .voltype    = "cluster/disperse",
           .option     = "!heal-timeout",
           .op_version  = GD_OP_VERSION_3_7_3,
           .type       = NO_DOC,
+        },
+        {
+          .key         = "dht.force-readdirp",
+          .voltype     = "cluster/distribute",
+          .option      = "use-readdirp",
+          .op_version  = GD_OP_VERSION_3_7_5,
+          .flags       = OPT_FLAG_CLIENT_OPT
+        },
+        { .key         = "disperse.read-policy",
+          .voltype     = "cluster/disperse",
+          .op_version  = GD_OP_VERSION_3_7_6,
+          .flags       = OPT_FLAG_CLIENT_OPT
         },
         { .key         = NULL
         }

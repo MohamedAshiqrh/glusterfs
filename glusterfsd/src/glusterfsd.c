@@ -96,8 +96,8 @@ static error_t parse_opts (int32_t key, char *arg, struct argp_state *_state);
 static struct argp_option gf_options[] = {
         {0, 0, 0, 0, "Basic options:"},
         {"volfile-server", ARGP_VOLFILE_SERVER_KEY, "SERVER", 0,
-         "Server to get the volume file from.  This option overrides "
-         "--volfile option"},
+         "Server to get the volume file from. Unix domain socket path when "
+         "transport type 'unix'. This option overrides --volfile option"},
         {"volfile", ARGP_VOLUME_FILE_KEY, "VOLFILE", 0,
          "File to use as VOLUME_FILE"},
         {"spec-file", ARGP_VOLUME_FILE_KEY, "VOLFILE", OPTION_HIDDEN,
@@ -198,6 +198,8 @@ static struct argp_option gf_options[] = {
 	{"gid-timeout", ARGP_GID_TIMEOUT_KEY, "SECONDS", 0,
 	 "Set auxilary group list timeout to SECONDS for fuse translator "
 	 "[default: 300]"},
+        {"resolve-gids", ARGP_RESOLVE_GIDS_KEY, 0, 0,
+         "Resolve all auxilary groups in fuse translator (max 32 otherwise)"},
 	{"background-qlen", ARGP_FUSE_BACKGROUND_QLEN_KEY, "N", 0,
 	 "Set fuse module's background queue length to N "
 	 "[default: 64]"},
@@ -427,6 +429,16 @@ set_fuse_mount_options (glusterfs_ctx_t *ctx, dict_t *options)
 			goto err;
 		}
 	}
+
+        if (cmd_args->resolve_gids) {
+                ret = dict_set_static_ptr (options, "resolve-gids", "on");
+                if (ret < 0) {
+                        gf_msg ("glusterfsd", GF_LOG_ERROR, 0, glusterfsd_msg_4,
+                                "resolve-gids");
+                        goto err;
+                }
+        }
+
 	if (cmd_args->background_qlen) {
 		ret = dict_set_int32 (options, "background-qlen",
                                       cmd_args->background_qlen);
@@ -1075,6 +1087,11 @@ parse_opts (int key, char *arg, struct argp_state *state)
 
 		argp_failure(state, -1, 0, "unknown group list timeout %s", arg);
 		break;
+
+        case ARGP_RESOLVE_GIDS_KEY:
+                cmd_args->resolve_gids = 1;
+                break;
+
         case ARGP_FUSE_BACKGROUND_QLEN_KEY:
                 if (!gf_string2int (arg, &cmd_args->background_qlen))
                         break;
@@ -1305,8 +1322,8 @@ emancipate (glusterfs_ctx_t *ctx, int ret)
 {
         /* break free from the parent */
         if (ctx->daemon_pipe[1] != -1) {
-                write (ctx->daemon_pipe[1], (void *) &ret, sizeof (ret));
-                close (ctx->daemon_pipe[1]);
+                sys_write (ctx->daemon_pipe[1], (void *) &ret, sizeof (ret));
+                sys_close (ctx->daemon_pipe[1]);
                 ctx->daemon_pipe[1] = -1;
         }
 }
@@ -1749,7 +1766,7 @@ parse_cmdline (int argc, char *argv[], glusterfs_ctx_t *ctx)
         cmd_args = &ctx->cmd_args;
 
         /* Do this before argp_parse so it can be overridden. */
-        if (access(SECURE_ACCESS_FILE,F_OK) == 0) {
+        if (sys_access (SECURE_ACCESS_FILE, F_OK) == 0) {
                 cmd_args->secure_mgmt = 1;
         }
 
@@ -1801,7 +1818,7 @@ parse_cmdline (int argc, char *argv[], glusterfs_ctx_t *ctx)
 
                 /* Check if the volfile exists, if not give usage output
                    and exit */
-                ret = stat (cmd_args->volfile, &stbuf);
+                ret = sys_stat (cmd_args->volfile, &stbuf);
                 if (ret) {
                         gf_msg ("glusterfs", GF_LOG_CRITICAL, errno,
                                 glusterfsd_msg_16);
@@ -1906,7 +1923,7 @@ glusterfs_pidfile_cleanup (glusterfs_ctx_t *ctx)
                       cmd_args->pid_file);
 
         if (ctx->cmd_args.pid_file) {
-                unlink (ctx->cmd_args.pid_file);
+                sys_unlink (ctx->cmd_args.pid_file);
                 ctx->cmd_args.pid_file = NULL;
         }
 
@@ -1937,7 +1954,7 @@ glusterfs_pidfile_update (glusterfs_ctx_t *ctx)
                 return ret;
         }
 
-        ret = ftruncate (fileno (pidfp), 0);
+        ret = sys_ftruncate (fileno (pidfp), 0);
         if (ret) {
                 gf_msg ("glusterfsd", GF_LOG_ERROR, errno, glusterfsd_msg_20,
                         cmd_args->pid_file);
@@ -2096,8 +2113,8 @@ daemonize (glusterfs_ctx_t *ctx)
         switch (ret) {
         case -1:
                 if (ctx->daemon_pipe[0] != -1) {
-                        close (ctx->daemon_pipe[0]);
-                        close (ctx->daemon_pipe[1]);
+                        sys_close (ctx->daemon_pipe[0]);
+                        sys_close (ctx->daemon_pipe[1]);
                 }
 
                 gf_msg ("daemonize", GF_LOG_ERROR, errno, glusterfsd_msg_24);
@@ -2105,12 +2122,12 @@ daemonize (glusterfs_ctx_t *ctx)
         case 0:
                 /* child */
                 /* close read */
-                close (ctx->daemon_pipe[0]);
+                sys_close (ctx->daemon_pipe[0]);
                 break;
         default:
                 /* parent */
                 /* close write */
-                close (ctx->daemon_pipe[1]);
+                sys_close (ctx->daemon_pipe[1]);
 
                 if (ctx->mnt_pid > 0) {
                         ret = waitpid (ctx->mnt_pid, &cstatus, 0);
@@ -2122,7 +2139,7 @@ daemonize (glusterfs_ctx_t *ctx)
                 }
 
                 err = 1;
-                read (ctx->daemon_pipe[0], (void *)&err, sizeof (err));
+                sys_read (ctx->daemon_pipe[0], (void *)&err, sizeof (err));
                 _exit (err);
         }
 

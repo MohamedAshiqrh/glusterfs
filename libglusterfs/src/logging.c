@@ -26,6 +26,8 @@
 
 #include <sys/stat.h>
 
+#include "syscall.h"
+
 #define GF_JSON_MSG_LENGTH      8192
 #define GF_SYSLOG_CEE_FORMAT    \
         "@cee: {\"msg\": \"%s\", \"gf_code\": \"%u\", \"gf_message\": \"%s\"}"
@@ -292,18 +294,6 @@ log_buf_init (log_buf_t *buf, const char *domain, const char *file,
               int errnum, uint64_t msgid, char **appmsgstr, int graph_id)
 {
         int ret = -1;
-        xlator_t        *old_THIS;
-        extern xlator_t global_xlator;
-
-        /*
-         * The current translator will be put in the block header for any
-         * memory block we allocate here.  Unfortunately, these objects might
-         * outlive the current translator, and if we then try to dereference
-         * that pointer we go BOOM.  Since this is really a global structure,
-         * use the global translator.
-         */
-        old_THIS = THIS;
-        THIS = &global_xlator;
 
         if (!buf || !domain || !file || !function || !appmsgstr || !*appmsgstr)
                 goto out;
@@ -334,7 +324,6 @@ log_buf_init (log_buf_t *buf, const char *domain, const char *file,
 
         ret = 0;
 out:
-        THIS = old_THIS;
         return ret;
 }
 
@@ -382,7 +371,7 @@ gf_log_rotate(glusterfs_ctx_t *ctx)
                                 "logfile");
                         return;
                 }
-                close (fd);
+                sys_close (fd);
 
                 new_logfile = fopen (ctx->log.filename, "a");
                 if (!new_logfile) {
@@ -702,7 +691,7 @@ gf_log_init (void *data, const char *file, const char *ident)
                 gf_openlog (NULL, -1, LOG_DAEMON);
         }
         /* TODO: make FACILITY configurable than LOG_DAEMON */
-        if (stat (GF_LOG_CONTROL_FILE, &buf) == 0) {
+        if (sys_stat (GF_LOG_CONTROL_FILE, &buf) == 0) {
                 /* use syslog logging */
                 ctx->log.log_control_file_found = 1;
         } else {
@@ -754,7 +743,7 @@ gf_log_init (void *data, const char *file, const char *ident)
                          " \"%s\" (%s)\n", file, strerror (errno));
                 return -1;
         }
-        close (fd);
+        sys_close (fd);
 
         ctx->log.logfile = fopen (file, "a");
         if (!ctx->log.logfile) {
@@ -806,7 +795,7 @@ _gf_log_callingfn (const char *domain, const char *file, const char *function,
                 if (this->loglevel && (level > this->loglevel))
                         goto out;
         }
-        if (level > ctx->log.loglevel)
+        if (level > ctx->log.loglevel || level == GF_LOG_NONE)
                 goto out;
 
         static char *level_strings[] = {"",  /* NONE */
@@ -995,7 +984,7 @@ _gf_msg_plain (gf_loglevel_t level, const char *fmt, ...)
                 if (this->loglevel && (level > this->loglevel))
                         goto out;
         }
-        if (level > ctx->log.loglevel)
+        if (level > ctx->log.loglevel || level == GF_LOG_NONE)
                 goto out;
 
         va_start (ap, fmt);
@@ -1031,7 +1020,7 @@ _gf_msg_vplain (gf_loglevel_t level, const char *fmt, va_list ap)
                 if (this->loglevel && (level > this->loglevel))
                         goto out;
         }
-        if (level > ctx->log.loglevel)
+        if (level > ctx->log.loglevel || level == GF_LOG_NONE)
                 goto out;
 
         ret = vasprintf (&msg, fmt, ap);
@@ -1063,7 +1052,7 @@ _gf_msg_plain_nomem (gf_loglevel_t level, const char *msg)
                 if (this->loglevel && (level > this->loglevel))
                         goto out;
         }
-        if (level > ctx->log.loglevel)
+        if (level > ctx->log.loglevel || level == GF_LOG_NONE)
                 goto out;
 
         ret = _gf_msg_plain_internal (level, msg);
@@ -1095,7 +1084,7 @@ _gf_msg_backtrace_nomem (gf_loglevel_t level, int stacksize)
                 if (this->loglevel && (level > this->loglevel))
                         goto out;
         }
-        if (level > ctx->log.loglevel)
+        if (level > ctx->log.loglevel || level == GF_LOG_NONE)
                 goto out;
 
         bt_size = backtrace (array, ((stacksize <= 200)? stacksize : 200));
@@ -1182,7 +1171,7 @@ _gf_msg_nomem (const char *domain, const char *file,
                 if (this->loglevel && (level > this->loglevel))
                         goto out;
         }
-        if (level > ctx->log.loglevel)
+        if (level > ctx->log.loglevel || level == GF_LOG_NONE)
                 goto out;
 
         if (!domain || !file || !function) {
@@ -1247,7 +1236,7 @@ _gf_msg_nomem (const char *domain, const char *file,
 
                         /* write directly to the fd to prevent out of order
                          * message and stack */
-                        ret = write (fd, msg, wlen);
+                        ret = sys_write (fd, msg, wlen);
                         if (ret == -1) {
                                 pthread_mutex_unlock (&ctx->log.logfile_mutex);
                                 goto out;
@@ -2051,7 +2040,7 @@ _gf_msg (const char *domain, const char *file, const char *function,
                 if (this->loglevel && (level > this->loglevel))
                         goto out;
         }
-        if (level > ctx->log.loglevel)
+        if (level > ctx->log.loglevel || level == GF_LOG_NONE)
                 goto out;
 
         if (trace) {
@@ -2132,7 +2121,7 @@ _gf_log (const char *domain, const char *file, const char *function, int line,
                 if (this->loglevel && (level > this->loglevel))
                         goto out;
         }
-        if (level > ctx->log.loglevel)
+        if (level > ctx->log.loglevel || level == GF_LOG_NONE)
                 goto out;
 
         static char *level_strings[] = {"",  /* NONE */
@@ -2192,7 +2181,7 @@ _gf_log (const char *domain, const char *file, const char *function, int line,
                                 "failed to open logfile");
                         return -1;
                 }
-                close (fd);
+                sys_close (fd);
 
                 new_logfile = fopen (ctx->log.filename, "a");
                 if (!new_logfile) {
@@ -2366,7 +2355,7 @@ gf_cmd_log_init (const char *filename)
                         LG_MSG_FILE_OP_FAILED, "failed to open cmd_log_file");
                 return -1;
         }
-        close (fd);
+        sys_close (fd);
 
         ctx->log.cmdlogfile = fopen (ctx->log.cmd_log_filename, "a");
         if (!ctx->log.cmdlogfile){

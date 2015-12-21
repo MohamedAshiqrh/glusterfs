@@ -2847,12 +2847,25 @@ glfs_getxattr_common (struct glfs *fs, const char *path, const char *name,
         DECLARE_OLD_THIS;
         __GLFS_ENTRY_VALIDATE_FS (fs, invalid_fs);
 
+        if (!name || *name == '\0') {
+                ret = -1;
+                errno = EINVAL;
+                goto out;
+        }
+
+        if (strlen(name) > GF_XATTR_NAME_MAX) {
+                ret = -1;
+                errno = ENAMETOOLONG;
+                goto out;
+        }
+
 	subvol = glfs_active_subvol (fs);
 	if (!subvol) {
 		ret = -1;
 		errno = EIO;
 		goto out;
 	}
+
 retry:
 	if (follow)
 		ret = glfs_resolve (fs, subvol, path, &loc, &iatt, reval);
@@ -2916,6 +2929,18 @@ pub_glfs_fgetxattr (struct glfs_fd *glfd, const char *name, void *value,
 
         DECLARE_OLD_THIS;
 	__GLFS_ENTRY_VALIDATE_FD (glfd, invalid_fs);
+
+        if (!name || *name == '\0') {
+                ret = -1;
+                errno = EINVAL;
+                goto out;
+        }
+
+        if (strlen(name) > GF_XATTR_NAME_MAX) {
+                ret = -1;
+                errno = ENAMETOOLONG;
+                goto out;
+        }
 
 	subvol = glfs_active_subvol (glfd->fs);
 	if (!subvol) {
@@ -3110,12 +3135,25 @@ glfs_setxattr_common (struct glfs *fs, const char *path, const char *name,
         DECLARE_OLD_THIS;
         __GLFS_ENTRY_VALIDATE_FS (fs, invalid_fs);
 
+        if (!name || *name == '\0') {
+                ret = -1;
+                errno = EINVAL;
+                goto out;
+        }
+
+        if (strlen(name) > GF_XATTR_NAME_MAX) {
+                ret = -1;
+                errno = ENAMETOOLONG;
+                goto out;
+        }
+
 	subvol = glfs_active_subvol (fs);
 	if (!subvol) {
 		ret = -1;
 		errno = EIO;
 		goto out;
 	}
+
 retry:
 	if (follow)
 		ret = glfs_resolve (fs, subvol, path, &loc, &iatt, reval);
@@ -3184,6 +3222,18 @@ pub_glfs_fsetxattr (struct glfs_fd *glfd, const char *name, const void *value,
 
         DECLARE_OLD_THIS;
 	__GLFS_ENTRY_VALIDATE_FD (glfd, invalid_fs);
+
+        if (!name || *name == '\0') {
+                ret = -1;
+                errno = EINVAL;
+                goto out;
+        }
+
+        if (strlen(name) > GF_XATTR_NAME_MAX) {
+                ret = -1;
+                errno = ENAMETOOLONG;
+                goto out;
+        }
 
 	subvol = glfs_active_subvol (glfd->fs);
 	if (!subvol) {
@@ -3803,8 +3853,8 @@ priv_glfs_process_upcall_event (struct glfs *fs, void *data)
         glusterfs_ctx_t    *ctx            = NULL;
         struct gf_upcall   *upcall_data    = NULL;
 
-        gf_log (THIS->name, GF_LOG_DEBUG,
-                "Upcall gfapi callback is called");
+        gf_msg_debug (THIS->name, 0,
+                      "Upcall gfapi callback is called");
 
         if (!fs || !data)
                 goto out;
@@ -3829,15 +3879,15 @@ priv_glfs_process_upcall_event (struct glfs *fs, void *data)
 
         upcall_data = (struct gf_upcall *)data;
 
-        gf_log (THIS->name, GF_LOG_TRACE, "Upcall gfapi gfid = %s"
-                "ret = %d", (char *)(upcall_data->gfid), ret);
+        gf_msg_trace (THIS->name, 0, "Upcall gfapi gfid = %s"
+                      "ret = %d", (char *)(upcall_data->gfid), ret);
 
         u_list = GF_CALLOC (1, sizeof(*u_list),
                             glfs_mt_upcall_entry_t);
 
         if (!u_list) {
-                gf_log (THIS->name, GF_LOG_ERROR, "Upcall entry allocation"
-                        "failed.");
+                gf_msg (THIS->name, GF_LOG_ERROR, ENOMEM, API_MSG_ALLOC_FAILED,
+                        "Upcall entry allocation failed.");
                 goto out;
         }
 

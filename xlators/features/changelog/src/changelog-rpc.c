@@ -187,7 +187,7 @@ changelog_rpc_clnt_cleanup (changelog_rpc_clnt_t *crpc)
         GF_FREE (crpc);
 }
 
-static inline changelog_rpc_clnt_t *
+static changelog_rpc_clnt_t *
 changelog_rpc_clnt_init (xlator_t *this,
                          changelog_probe_req *rpc_req, changelog_clnt_t *c_clnt)
 {
@@ -246,7 +246,9 @@ changelog_handle_probe (rpcsvc_request_t *req)
         ret = xdr_to_generic (req->msg[0],
                               &rpc_req, (xdrproc_t)xdr_changelog_probe_req);
         if (ret < 0) {
-                gf_log ("", GF_LOG_ERROR, "xdr decoding error");
+                gf_msg ("", GF_LOG_ERROR, 0,
+                        CHANGELOG_MSG_HANDLE_PROBE_ERROR,
+                        "xdr decoding error");
                 req->rpc_err = GARBAGE_ARGS;
                 goto handle_xdr_error;
         }

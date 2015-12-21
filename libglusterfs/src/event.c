@@ -21,6 +21,7 @@
 #include "mem-pool.h"
 #include "common-utils.h"
 #include "libglusterfs-messages.h"
+#include "syscall.h"
 
 
 
@@ -121,6 +122,8 @@ event_dispatch (struct event_pool *event_pool)
         GF_VALIDATE_OR_GOTO ("event", event_pool, out);
 
         ret = event_pool->ops->event_dispatch (event_pool);
+        if (ret)
+                goto out;
 
 out:
         return ret;
@@ -175,7 +178,7 @@ poller_destroy_handler (int fd, int idx, void *data,
         if (readfd < 0)
                 return -1;
 
-        while (read (readfd, &buf, 1) > 0) {
+        while (sys_read (readfd, &buf, 1) > 0) {
         }
         return 0;
 }
@@ -252,7 +255,7 @@ event_dispatch_destroy (struct event_pool *event_pool)
                 int retry = 0;
 
                 while (event_pool->activethreadcount > 0 && retry++ < 10) {
-                        if (write (fd[1], "dummy", 6) == -1)
+                        if (sys_write (fd[1], "dummy", 6) == -1)
                                 break;
                         sleep_till.tv_sec = time (NULL) + 1;
                         ret = pthread_cond_timedwait (&event_pool->cond,
@@ -266,9 +269,9 @@ event_dispatch_destroy (struct event_pool *event_pool)
 
  out:
         if (fd[0] != -1)
-                close (fd[0]);
+                sys_close (fd[0]);
         if (fd[1] != -1)
-                close (fd[1]);
+                sys_close (fd[1]);
 
         return ret;
 }

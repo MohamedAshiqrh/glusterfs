@@ -13,6 +13,13 @@
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/x509v3.h>
+#ifdef HAVE_OPENSSL_DH_H
+#include <openssl/dh.h>
+#endif
+#ifdef HAVE_OPENSSL_ECDH_H
+#include <openssl/ecdh.h>
+#endif
 
 #include "event.h"
 #include "rpc-transport.h"

@@ -38,6 +38,11 @@ glusterd_snap_volinfo_restore (dict_t *dict, dict_t *rsp_dict,
                                glusterd_volinfo_t *new_volinfo,
                                glusterd_volinfo_t *snap_volinfo,
                                int32_t volcount);
+int32_t
+glusterd_snapobject_delete (glusterd_snap_t *snap);
+
+int32_t
+glusterd_cleanup_snaps_for_volume (glusterd_volinfo_t *volinfo);
 
 int32_t
 glusterd_missed_snapinfo_new (glusterd_missed_snap_info **missed_snapinfo);
@@ -94,10 +99,17 @@ glusterd_get_geo_rep_session (char *slave_key, char *origin_volname,
 int32_t
 glusterd_restore_geo_rep_files (glusterd_volinfo_t *snap_vol);
 
+int
+glusterd_restore_nfs_ganesha_file (glusterd_volinfo_t *src_vol,
+                                   glusterd_snap_t *snap);
 int32_t
 glusterd_copy_quota_files (glusterd_volinfo_t *src_vol,
                            glusterd_volinfo_t *dest_vol,
                            gf_boolean_t *conf_present);
+
+int
+glusterd_copy_nfs_ganesha_file (glusterd_volinfo_t *src_vol,
+                                glusterd_volinfo_t *dest_vol);
 
 int
 glusterd_snap_use_rsp_dict (dict_t *aggr, dict_t *rsp_dict);

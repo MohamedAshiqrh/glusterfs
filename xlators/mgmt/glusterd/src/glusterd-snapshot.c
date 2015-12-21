@@ -81,6 +81,7 @@ typedef struct snap_create_args_ snap_create_args_t;
    then the snap device will be /dev/<group-name>/<snapname>.
    This function takes care of building the path for the snap device.
 */
+
 char *
 glusterd_build_snap_device_path (char *device, char *snapname,
                                  int32_t brickcount)
@@ -612,7 +613,7 @@ glusterd_snapshot_backup_vol (glusterd_volinfo_t *volinfo)
                   priv->workdir);
 
         /* Create trash folder if it is not there */
-        ret = mkdir (trashdir, 0777);
+        ret = sys_mkdir (trashdir, 0777);
         if (ret && errno != EEXIST) {
                 gf_msg (this->name, GF_LOG_ERROR, errno,
                         GD_MSG_DIR_OP_FAILED,
@@ -623,7 +624,7 @@ glusterd_snapshot_backup_vol (glusterd_volinfo_t *volinfo)
         }
 
         /* Move the origin volume volder to the backup location */
-        ret = rename (pathname, delete_path);
+        ret = sys_rename (pathname, delete_path);
         if (ret) {
                 gf_msg (this->name, GF_LOG_ERROR, errno,
                         GD_MSG_FILE_OP_FAILED,
@@ -634,7 +635,7 @@ glusterd_snapshot_backup_vol (glusterd_volinfo_t *volinfo)
 
         /* Re-create an empty origin volume folder so that restore can
          * happen. */
-        ret = mkdir (pathname, 0777);
+        ret = sys_mkdir (pathname, 0777);
         if (ret && errno != EEXIST) {
                 gf_msg (this->name, GF_LOG_ERROR, errno,
                         GD_MSG_DIR_OP_FAILED,
@@ -651,14 +652,14 @@ out:
         op_ret = ret;
         if (ret) {
                 /* Revert the changes in case of failure */
-                ret = rmdir (pathname);
+                ret = sys_rmdir (pathname);
                 if (ret) {
                         gf_msg_debug (this->name, 0,
                                 "Failed to rmdir: %s,err: %s",
                                 pathname, strerror (errno));
                 }
 
-                ret = rename (delete_path, pathname);
+                ret = sys_rename (delete_path, pathname);
                 if (ret) {
                         gf_msg (this->name, GF_LOG_ERROR, errno,
                                 GD_MSG_FILE_OP_FAILED,
@@ -666,7 +667,7 @@ out:
                                 delete_path, pathname);
                 }
 
-                ret = rmdir (trashdir);
+                ret = sys_rmdir (trashdir);
                 if (ret) {
                         gf_msg_debug (this->name, 0,
                                 "Failed to rmdir: %s, Reason: %s",
@@ -711,7 +712,7 @@ glusterd_copy_geo_rep_files (glusterd_volinfo_t *origin_vol,
 
         GLUSTERD_GET_SNAP_GEO_REP_DIR(snapgeo_dir, snap_vol->snapshot, priv);
 
-        ret = mkdir (snapgeo_dir, 0777);
+        ret = sys_mkdir (snapgeo_dir, 0777);
         if (ret) {
                 gf_msg (this->name, GF_LOG_ERROR, errno,
                         GD_MSG_DIR_OP_FAILED,
@@ -1947,6 +1948,142 @@ out:
 }
 
 int
+glusterd_snapshot_pause_tier (xlator_t *this, glusterd_volinfo_t *volinfo)
+{
+        int                     ret             = -1;
+        dict_t                 *dict            = NULL;
+        char                   *op_errstr       = NULL;
+
+        GF_VALIDATE_OR_GOTO ("glusterd", this, out);
+        GF_VALIDATE_OR_GOTO (this->name, volinfo, out);
+
+        if (volinfo->type != GF_CLUSTER_TYPE_TIER) {
+                ret = 0;
+                goto out;
+        }
+
+        dict = dict_new ();
+        if (!dict) {
+                goto out;
+        }
+
+        ret = dict_set_int32 (dict, "rebalance-command",
+                              GF_DEFRAG_CMD_PAUSE_TIER);
+        if (ret) {
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        GD_MSG_DICT_SET_FAILED,
+                        "Failed to set rebalance-command");
+                goto out;
+        }
+
+        ret = dict_set_str (dict, "volname", volinfo->volname);
+        if (ret) {
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        GD_MSG_DICT_SET_FAILED,
+                        "Failed to set volname");
+                goto out;
+        }
+
+        ret = gd_brick_op_phase (GD_OP_DEFRAG_BRICK_VOLUME, NULL,
+                                 dict, &op_errstr);
+        if (ret) {
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        GD_MSG_SNAP_PAUSE_TIER_FAIL,
+                        "Failed to pause tier. Errstr=%s",
+                        op_errstr);
+                goto out;
+        }
+
+out:
+        if (dict)
+                dict_unref (dict);
+
+        return ret;
+}
+
+
+int
+glusterd_snapshot_resume_tier (xlator_t *this, dict_t *snap_dict)
+{
+        int                     ret             = -1;
+        dict_t                 *dict            = NULL;
+        int64_t                 volcount        = 0;
+        char                    key[PATH_MAX]   = "";
+        char                   *volname         = NULL;
+        int                     i               = 0;
+        char                   *op_errstr       = NULL;
+        glusterd_volinfo_t     *volinfo         = NULL;
+
+        GF_VALIDATE_OR_GOTO ("glusterd", this, out);
+        GF_VALIDATE_OR_GOTO (this->name, snap_dict, out);
+
+        ret = dict_get_int64 (snap_dict, "volcount", &volcount);
+        if (ret) {
+                goto out;
+        }
+        if (volcount <= 0) {
+                ret = -1;
+                goto out;
+        }
+
+        dict = dict_new ();
+        if (!dict)
+                goto out;
+
+        for (i = 1; i <= volcount; i++) {
+                snprintf (key, sizeof (key), "volname%d", i);
+                ret = dict_get_str (snap_dict, key, &volname);
+                if (ret) {
+                        gf_msg (this->name, GF_LOG_ERROR, 0,
+                                GD_MSG_DICT_SET_FAILED,
+                                "Failed to get key %s", volname);
+                        goto out;
+                }
+
+                ret = glusterd_volinfo_find (volname, &volinfo);
+                if (ret)
+                        goto out;
+
+                if (volinfo->type != GF_CLUSTER_TYPE_TIER)
+                        continue;
+
+                ret = dict_set_int32 (dict, "rebalance-command",
+                                      GF_DEFRAG_CMD_RESUME_TIER);
+                if (ret) {
+                        gf_msg (this->name, GF_LOG_ERROR, 0,
+                                GD_MSG_DICT_SET_FAILED,
+                        "Failed to set rebalance-command");
+
+                        goto out;
+                }
+
+                ret = dict_set_str (dict, "volname", volname);
+                if (ret) {
+                        gf_msg (this->name, GF_LOG_ERROR, 0,
+                                GD_MSG_DICT_SET_FAILED,
+                                "Failed to set volname");
+                        goto out;
+                }
+
+                ret = gd_brick_op_phase (GD_OP_DEFRAG_BRICK_VOLUME, NULL,
+                                         dict, &op_errstr);
+                if (ret) {
+                        gf_msg (this->name, GF_LOG_ERROR, 0,
+                                GD_MSG_SNAP_RESUME_TIER_FAIL,
+                                "Failed to resume tier");
+                        goto out;
+                }
+        }
+
+out:
+        if (dict)
+                dict_unref (dict);
+
+        return ret;
+}
+
+
+int
 glusterd_snap_create_clone_common_prevalidate (dict_t *rsp_dict, int flags,
                                                char *snapname, char *err_str,
                                                char *snap_volname,
@@ -2248,7 +2385,6 @@ glusterd_snapshot_clone_prevalidate (dict_t *dict, char **op_errstr,
                 goto out;
         }
 
-        ret = 0;
 out:
 
         if (ret && err_str[0] != '\0') {
@@ -2438,6 +2574,14 @@ glusterd_snapshot_create_prevalidate (dict_t *dict, char **op_errstr,
                         goto out;
                 }
 
+                ret = glusterd_snapshot_pause_tier (this, volinfo);
+                if (ret) {
+                        gf_msg (this->name, GF_LOG_ERROR, 0,
+                                GD_MSG_SNAP_PAUSE_TIER_FAIL,
+                                "Failed to pause tier in snap prevalidate.");
+                        goto out;
+                }
+
         }
 
         ret = dict_set_int64 (rsp_dict, "volcount", volcount);
@@ -2448,6 +2592,7 @@ glusterd_snapshot_create_prevalidate (dict_t *dict, char **op_errstr,
         }
 
         ret = 0;
+
 out:
         if (ret && err_str[0] != '\0') {
                 gf_msg (this->name, loglevel, 0,
@@ -2727,7 +2872,7 @@ glusterd_lvm_snapshot_remove (dict_t *rsp_dict, glusterd_volinfo_t *snap_vol)
                         continue;
                 }
 
-                ret = lstat (brick_mount_path, &stbuf);
+                ret = sys_lstat (brick_mount_path, &stbuf);
                 if (ret) {
                         gf_msg_debug (this->name, 0,
                                 "Brick %s:%s already deleted.",
@@ -2777,7 +2922,7 @@ glusterd_lvm_snapshot_remove (dict_t *rsp_dict, glusterd_volinfo_t *snap_vol)
                 }
 
                 /* Verify if the device path exists or not */
-                ret = stat (brickinfo->device_path, &stbuf);
+                ret = sys_stat (brickinfo->device_path, &stbuf);
                 if (ret) {
                         gf_msg_debug (this->name, 0,
                                 "LV (%s) for brick (%s:%s) not present. "
@@ -2956,32 +3101,11 @@ out:
 }
 
 int32_t
-glusterd_snapobject_delete (glusterd_snap_t *snap)
-{
-        if (snap == NULL) {
-                gf_msg(THIS->name, GF_LOG_WARNING, EINVAL,
-                       GD_MSG_INVALID_ENTRY, "snap is NULL");
-                return -1;
-        }
-
-        cds_list_del_init (&snap->snap_list);
-        cds_list_del_init (&snap->volumes);
-        if (LOCK_DESTROY(&snap->lock))
-                gf_msg (THIS->name, GF_LOG_WARNING, 0,
-                        GD_MSG_LOCK_DESTROY_FAILED, "Failed destroying lock"
-                        "of snap %s", snap->snapname);
-
-        GF_FREE (snap->description);
-        GF_FREE (snap);
-
-        return 0;
-}
-
-int32_t
 glusterd_snap_remove (dict_t *rsp_dict,
                       glusterd_snap_t *snap,
                       gf_boolean_t remove_lvm,
-                      gf_boolean_t force)
+                      gf_boolean_t force,
+                      gf_boolean_t is_clone)
 {
         int                 ret       = -1;
         int                 save_ret  =  0;
@@ -3016,14 +3140,20 @@ glusterd_snap_remove (dict_t *rsp_dict,
                 }
         }
 
-        ret = glusterd_store_delete_snap (snap);
-        if (ret) {
-                gf_msg(this->name, GF_LOG_WARNING, 0,
-                       GD_MSG_SNAP_REMOVE_FAIL, "Failed to remove snap %s "
-                       "from store", snap->snapname);
-                save_ret = ret;
-                if (!force)
-                        goto out;
+        /* A clone does not persist snap info in /var/lib/glusterd/snaps/ *
+         * and hence there is no snap info to be deleted from there       *
+         */
+        if (!is_clone) {
+                ret = glusterd_store_delete_snap (snap);
+                if (ret) {
+                        gf_msg(this->name, GF_LOG_WARNING, 0,
+                               GD_MSG_SNAP_REMOVE_FAIL,
+                               "Failed to remove snap %s from store",
+                               snap->snapname);
+                        save_ret = ret;
+                        if (!force)
+                                goto out;
+                }
         }
 
         ret = glusterd_snapobject_delete (snap);
@@ -4424,7 +4554,8 @@ out:
         if (ret) {
                 if (snap)
                         glusterd_snap_remove (rsp_dict, snap,
-                                              _gf_true, _gf_true);
+                                              _gf_true, _gf_true,
+                                              _gf_false);
                 snap = NULL;
         }
 
@@ -4632,7 +4763,7 @@ glusterd_snap_brick_create (glusterd_volinfo_t *snap_volinfo,
                 goto out;
         }
 
-        ret = stat (brickinfo->path, &statbuf);
+        ret = sys_stat (brickinfo->path, &statbuf);
         if (ret) {
                 gf_msg (this->name, GF_LOG_WARNING, errno,
                         GD_MSG_FILE_OP_FAILED,
@@ -5104,6 +5235,16 @@ glusterd_do_snap_vol (glusterd_volinfo_t *origin_vol, glusterd_snap_t *snap,
                                 origin_vol->volname);
                         goto out;
                 }
+
+
+        }
+
+        ret = glusterd_copy_nfs_ganesha_file (origin_vol, snap_vol);
+        if (ret < 0) {
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        GD_MSG_VOL_OP_FAILED, "Failed to copy export "
+                        "file for volume %s", origin_vol->volname);
+                goto out;
         }
         glusterd_auth_set_username (snap_vol, username);
         glusterd_auth_set_password (snap_vol, password);
@@ -5523,15 +5664,16 @@ glusterd_handle_snapshot_delete (rpcsvc_request_t *req, glusterd_op_t op,
         GF_ASSERT (err_str);
         GF_VALIDATE_OR_GOTO (this->name, op_errno, out);
 
-        ret = dict_get_int32 (dict, "delete-cmd", &delete_cmd);
+        ret = dict_get_int32 (dict, "sub-cmd", &delete_cmd);
         if (ret) {
                 gf_msg (this->name, GF_LOG_ERROR, 0,
-                        GD_MSG_COMMAND_NOT_FOUND, "Failed to get delete-cmd");
+                        GD_MSG_COMMAND_NOT_FOUND, "Failed to get sub-cmd");
                 goto out;
         }
 
         switch (delete_cmd) {
         case GF_SNAP_DELETE_TYPE_SNAP:
+        case GF_SNAP_DELETE_TYPE_ITER:
                 ret = glusterd_handle_snapshot_delete_type_snap (req, op, dict,
                                                                  err_str,
                                                                  op_errno, len);
@@ -5664,7 +5806,7 @@ glusterd_snapshot_status_prevalidate (dict_t *dict, char **op_errstr,
                 goto out;
         }
 
-        ret = dict_get_int32 (dict, "status-cmd", &cmd);
+        ret = dict_get_int32 (dict, "sub-cmd", &cmd);
         if (ret) {
                 gf_msg (this->name, GF_LOG_ERROR, 0,
                         GD_MSG_DICT_GET_FAILED,
@@ -5970,7 +6112,7 @@ glusterd_snapshot_remove_commit (dict_t *dict, char **op_errstr,
                 goto out;
         } else
                 gf_msg (this->name, GF_LOG_INFO, 0,
-                        GD_MSG_SNAPSHOT_OP_SUCCESS, "Successfully marked "
+                        GD_MSG_OP_SUCCESS, "Successfully marked "
                         "snap %s for decommission.", snap->snapname);
 
         if (is_origin_glusterd (dict) == _gf_true) {
@@ -6001,7 +6143,8 @@ glusterd_snapshot_remove_commit (dict_t *dict, char **op_errstr,
                 }
         }
 
-        ret = glusterd_snap_remove (rsp_dict, snap, _gf_true, _gf_false);
+        ret = glusterd_snap_remove (rsp_dict, snap, _gf_true, _gf_false,
+                                    _gf_false);
         if (ret) {
                 gf_msg (this->name, GF_LOG_ERROR, 0,
                         GD_MSG_SNAP_REMOVE_FAIL, "Failed to remove snap %s",
@@ -6073,7 +6216,8 @@ glusterd_do_snap_cleanup (dict_t *dict, char **op_errstr, dict_t *rsp_dict)
                 goto out;
         }
 
-        ret = glusterd_snap_remove (rsp_dict, snap, _gf_true, _gf_true);
+        ret = glusterd_snap_remove (rsp_dict, snap, _gf_true, _gf_true,
+                                    _gf_false);
         if (ret) {
                 /* Ignore failure as this is a cleanup of half cooked
                    snapshot */
@@ -6141,12 +6285,23 @@ glusterd_take_brick_snapshot_task (void *opaque)
 {
         int ret                             = 0;
         snap_create_args_t  *snap_args      = NULL;
+        char                *clonename      = NULL;
         char                 key[PATH_MAX]  = "";
 
         GF_ASSERT (opaque);
 
         snap_args = (snap_create_args_t*) opaque;
         THIS = snap_args->this;
+
+        /* Try and fetch clonename. If present set status with clonename *
+         * else do so as snap-vol */
+        ret = dict_get_str (snap_args->dict, "clonename", &clonename);
+        if (ret) {
+                snprintf (key, sizeof (key), "snap-vol%d.brick%d.status",
+                          snap_args->volcount, snap_args->brickorder);
+        } else
+                snprintf (key, sizeof (key), "clone%d.brick%d.status",
+                          snap_args->volcount, snap_args->brickorder);
 
         ret = glusterd_take_brick_snapshot (snap_args->dict,
                                             snap_args->snap_vol,
@@ -6163,8 +6318,6 @@ glusterd_take_brick_snapshot_task (void *opaque)
                         snap_args->snap_vol->volname);
         }
 
-        snprintf (key, sizeof (key), "snap-vol%d.brick%d.status",
-                  snap_args->volcount, snap_args->brickorder);
         if (dict_set_int32 (snap_args->rsp_dict, key, (ret)?0:1)) {
                 gf_msg (THIS->name, GF_LOG_ERROR, 0,
                         GD_MSG_DICT_SET_FAILED, "failed to "
@@ -6363,7 +6516,7 @@ out:
         if (ret) {
                 if (snap)
                         glusterd_snap_remove (rsp_dict, snap,
-                                              _gf_true, _gf_true);
+                                              _gf_true, _gf_true, _gf_true);
                 snap = NULL;
         }
 
@@ -6499,7 +6652,8 @@ out:
        if (ret) {
                if (snap)
                        glusterd_snap_remove (rsp_dict, snap,
-                                             _gf_true, _gf_true);
+                                             _gf_true, _gf_true,
+                                             _gf_true);
                snap = NULL;
        }
 
@@ -6697,7 +6851,8 @@ out:
         if (ret) {
                 if (snap)
                         glusterd_snap_remove (rsp_dict, snap,
-                                              _gf_true, _gf_true);
+                                              _gf_true, _gf_true,
+                                              _gf_false);
                 snap = NULL;
         }
 
@@ -7548,7 +7703,7 @@ glusterd_snapshot_status_commit (dict_t *dict, char **op_errstr,
         conf = this->private;
 
         GF_ASSERT (conf);
-        ret = dict_get_int32 (dict, "status-cmd", &cmd);
+        ret = dict_get_int32 (dict, "sub-cmd", &cmd);
         if (ret) {
                 gf_msg (this->name, GF_LOG_ERROR, 0,
                         GD_MSG_DICT_GET_FAILED,
@@ -7556,7 +7711,7 @@ glusterd_snapshot_status_commit (dict_t *dict, char **op_errstr,
                 goto out;
         }
 
-        ret = dict_set_int32 (rsp_dict, "status-cmd", cmd);
+        ret = dict_set_int32 (rsp_dict, "sub-cmd", cmd);
         if (ret) {
                 gf_msg (this->name, GF_LOG_ERROR, 0,
                         GD_MSG_DICT_SET_FAILED,
@@ -7723,6 +7878,12 @@ glusterd_handle_snap_limit (dict_t *dict, dict_t *rsp_dict)
                 snap = tmp_volinfo->snapshot;
                 GF_ASSERT (snap);
 
+                gf_msg (this->name, GF_LOG_WARNING, 0,
+                        GD_MSG_SOFT_LIMIT_REACHED, "Soft-limit "
+                        "(value = %"PRIu64") of volume %s is reached. "
+                        "Deleting snapshot %s.", limit, volinfo->volname,
+                        snap->snapname);
+
                 LOCK (&snap->lock);
                 {
                         snap->snap_status = GD_SNAP_STATUS_DECOMMISSION;
@@ -7736,7 +7897,8 @@ glusterd_handle_snap_limit (dict_t *dict, dict_t *rsp_dict)
                         }
 
                         ret = glusterd_snap_remove (rsp_dict, snap,
-                                                    _gf_true, _gf_true);
+                                                    _gf_true, _gf_true,
+                                                    _gf_false);
                         if (ret)
                                 gf_msg (this->name, GF_LOG_WARNING, 0,
                                         GD_MSG_SNAP_REMOVE_FAIL,
@@ -7772,27 +7934,6 @@ glusterd_snapshot_clone_postvalidate (dict_t *dict, int32_t op_ret,
         priv = this->private;
         GF_ASSERT (priv);
 
-        if (op_ret) {
-                ret = dict_get_int32 (dict, "cleanup", &cleanup);
-                if (!ret && cleanup) {
-                        ret = glusterd_do_snap_cleanup (dict, op_errstr,
-                                                        rsp_dict);
-                        if (ret) {
-                                gf_msg (this->name, GF_LOG_WARNING, 0,
-                                        GD_MSG_SNAP_CLEANUP_FAIL, "cleanup "
-                                        "operation failed");
-                                goto out;
-                        }
-                }
-                /* Irrespective of status of cleanup its better
-                 * to return from this function. As the functions
-                 * following this block is not required to be
-                 * executed in case of failure scenario.
-                 */
-                ret = 0;
-                goto out;
-        }
-
         ret = dict_get_str (dict, "clonename", &clonename);
         if (ret) {
                 gf_msg (this->name, GF_LOG_ERROR, 0,
@@ -7809,16 +7950,29 @@ glusterd_snapshot_clone_postvalidate (dict_t *dict, int32_t op_ret,
                 goto out;
         }
 
-        ret = glusterd_snapshot_update_snaps_post_validate (dict,
-                                                            op_errstr,
-                                                            rsp_dict);
-        if (ret) {
-                gf_msg (this->name, GF_LOG_ERROR, 0,
-                        GD_MSG_SNAP_CREATION_FAIL, "Failed to "
-                        "create snapshot");
+        if (snap_vol)
+                snap = snap_vol->snapshot;
+
+        /* Fetch snap object from snap_vol and delete it all in case of *
+         * a failure, or else, just delete the snap object as it is not *
+         * needed in case of a clone                                    *
+         */
+        if (op_ret) {
+                ret = dict_get_int32 (dict, "cleanup", &cleanup);
+                if (!ret && cleanup && snap) {
+                        glusterd_snap_remove (rsp_dict, snap,
+                                              _gf_true, _gf_true,
+                                              _gf_true);
+                }
+                /* Irrespective of status of cleanup its better
+                 * to return from this function. As the functions
+                 * following this block is not required to be
+                 * executed in case of failure scenario.
+                 */
+                ret = 0;
                 goto out;
         }
-        snap = snap_vol->snapshot;
+
         ret = glusterd_snapobject_delete (snap);
         if (ret) {
                 gf_msg (this->name, GF_LOG_WARNING, 0,
@@ -7827,8 +7981,6 @@ glusterd_snapshot_clone_postvalidate (dict_t *dict, int32_t op_ret,
                 goto out;
         }
         snap_vol->snapshot = NULL;
-
-        ret = 0;
 
 out:
         return ret;
@@ -7923,7 +8075,13 @@ glusterd_snapshot_create_postvalidate (dict_t *dict, int32_t op_ret,
                 //ignore the errors of autodelete
                 ret = glusterd_handle_snap_limit (dict, rsp_dict);
         }
-        ret = 0;
+
+        ret = glusterd_snapshot_resume_tier (this, dict);
+        if (ret) {
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        GD_MSG_SNAP_RESUME_TIER_FAIL,
+                        "Failed to resume tier in snapshot postvalidate.");
+        }
 
 out:
         return ret;
@@ -8355,7 +8513,8 @@ glusterd_snapshot_restore_cleanup (dict_t *rsp_dict,
                   volname);
 
         /* Now delete the snap entry. */
-        ret = glusterd_snap_remove (rsp_dict, snap, _gf_false, _gf_true);
+        ret = glusterd_snap_remove (rsp_dict, snap, _gf_false, _gf_true,
+                                    _gf_false);
         if (ret) {
                 gf_msg (this->name, GF_LOG_WARNING, 0,
                         GD_MSG_SNAP_REMOVE_FAIL, "Failed to delete "
@@ -8421,7 +8580,7 @@ glusterd_snapshot_revert_partial_restored_vol (glusterd_volinfo_t *volinfo)
 
         /* Now move the backup copy of the vols to its original
          * location.*/
-        ret = rename (trash_path, pathname);
+        ret = sys_rename (trash_path, pathname);
         if (ret) {
                 gf_msg (this->name, GF_LOG_ERROR, errno,
                         GD_MSG_DIR_OP_FAILED, "Failed to rename folder "
@@ -8752,7 +8911,7 @@ glusterd_is_lvm_cmd_available (char *lvm_cmd)
         if (!lvm_cmd)
                 return _gf_false;
 
-        ret = stat (lvm_cmd, &buf);
+        ret = sys_stat (lvm_cmd, &buf);
         if (ret != 0) {
                 gf_msg (THIS->name, GF_LOG_ERROR, errno,
                         GD_MSG_FILE_OP_FAILED,
@@ -9005,7 +9164,7 @@ glusterd_handle_snapshot (rpcsvc_request_t *req)
         return glusterd_big_locked_handler (req, glusterd_handle_snapshot_fn);
 }
 
-static inline void
+static void
 glusterd_free_snap_op (glusterd_snap_op_t *snap_op)
 {
         if (snap_op) {
@@ -9016,7 +9175,7 @@ glusterd_free_snap_op (glusterd_snap_op_t *snap_op)
         }
 }
 
-static inline void
+static void
 glusterd_free_missed_snapinfo (glusterd_missed_snap_info *missed_snapinfo)
 {
         glusterd_snap_op_t *snap_opinfo = NULL;
@@ -9443,7 +9602,6 @@ gd_restore_snap_volume (dict_t *dict, dict_t *rsp_dict,
         strcpy (new_volinfo->volname, orig_vol->volname);
         gf_uuid_copy (new_volinfo->volume_id, orig_vol->volume_id);
         new_volinfo->snap_count = orig_vol->snap_count;
-        new_volinfo->snap_max_hard_limit = orig_vol->snap_max_hard_limit;
         gf_uuid_copy (new_volinfo->restored_from_snap,
                    snap_vol->snapshot->snap_id);
 
@@ -9474,6 +9632,16 @@ gd_restore_snap_volume (dict_t *dict, dict_t *rsp_dict,
                         "Failed to restore "
                         "geo-rep files for snap %s",
                         snap_vol->snapshot->snapname);
+        }
+
+        ret = glusterd_restore_nfs_ganesha_file (orig_vol, snap);
+        if (ret) {
+                gf_msg (this->name, GF_LOG_WARNING, 0,
+                        GD_MSG_SNAP_RESTORE_FAIL,
+                        "Failed to restore "
+                        "nfs-ganesha export file for snap %s",
+                        snap_vol->snapshot->snapname);
+                goto out;
         }
 
         ret = glusterd_copy_quota_files (snap_vol, orig_vol, &conf_present);

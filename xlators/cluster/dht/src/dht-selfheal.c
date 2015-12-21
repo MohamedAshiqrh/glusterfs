@@ -209,7 +209,7 @@ unlock:
 
         if (is_last_call (this_call_cnt)) {
                 if (local->op_ret == 0) {
-                        dht_refresh_layout_done (frame);
+                        local->refresh_layout_done (frame);
                 } else {
                         goto err;
                 }
@@ -219,7 +219,8 @@ unlock:
         return 0;
 
 err:
-        dht_selfheal_dir_finish (frame, this, -1);
+        local->refresh_layout_unlock (frame, this, -1);
+
         return 0;
 }
 
@@ -285,7 +286,7 @@ dht_refresh_layout (call_frame_t *frame)
         return 0;
 
 out:
-        dht_selfheal_dir_finish (frame, this, -1);
+        local->refresh_layout_unlock (frame, this, -1);
         return 0;
 }
 
@@ -294,9 +295,21 @@ int32_t
 dht_selfheal_layout_lock_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                               int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
-        if (op_ret < 0) {
+        dht_local_t     *local = NULL;
+
+        local = frame->local;
+
+        if (!local) {
                 goto err;
         }
+
+        if (op_ret < 0) {
+                local->op_errno = op_errno;
+                goto err;
+        }
+
+        local->refresh_layout_unlock = dht_selfheal_dir_finish;
+        local->refresh_layout_done = dht_refresh_layout_done;
 
         dht_refresh_layout (frame);
         return 0;
@@ -369,7 +382,7 @@ out:
         return fixit;
 }
 
-inline int
+int
 dht_layout_span (dht_layout_t *layout)
 {
         int i = 0, count = 0;
@@ -1098,7 +1111,6 @@ dht_selfheal_dir_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         if (op_ret) {
-
                 gf_uuid_unparse(local->loc.gfid, gfid);
                 gf_msg (this->name, ((op_errno == EEXIST) ? GF_LOG_DEBUG :
                                      GF_LOG_WARNING),
@@ -1187,7 +1199,8 @@ dht_selfheal_dir_mkdir (call_frame_t *frame, loc_t *loc,
         }
 
         if (missing_dirs == 0) {
-                dht_selfheal_dir_setattr (frame, loc, &local->stbuf, 0xffffffff, layout);
+                dht_selfheal_dir_setattr (frame, loc, &local->stbuf,
+                                          0xffffffff, layout);
                 return 0;
         }
 
@@ -1265,7 +1278,7 @@ dht_selfheal_layout_alloc_start (xlator_t *this, loc_t *loc,
         return start;
 }
 
-static inline int
+static int
 dht_get_layout_count (xlator_t *this, dht_layout_t *layout, int new_layout)
 {
         int i = 0;
@@ -1550,14 +1563,15 @@ dht_selfheal_layout_new_directory (call_frame_t *frame, loc_t *loc,
                                    dht_layout_t *layout)
 {
         xlator_t    *this = NULL;
-        uint32_t     chunk = 0;
+        double       chunk = 0;
         int          i = 0;
         uint32_t     start = 0;
         int          bricks_to_use = 0;
         int          err = 0;
         int          start_subvol = 0;
         uint32_t     curr_size;
-        uint32_t     total_size = 0;
+        uint32_t     range_size;
+        uint64_t     total_size = 0;
         int          real_i;
         dht_conf_t   *priv;
         gf_boolean_t weight_by_size;
@@ -1590,9 +1604,9 @@ dht_selfheal_layout_new_directory (call_frame_t *frame, loc_t *loc,
 
         if (weight_by_size && total_size) {
                 /* We know total_size is not zero. */
-                chunk = ((unsigned long) 0xffffffff) / total_size;
+                chunk = ((double) 0xffffffff) / ((double) total_size);
                 gf_msg_debug (this->name, 0,
-                              "chunk size = 0xffffffff / %u = 0x%x",
+                              "chunk size = 0xffffffff / %lu = %f",
                               total_size, chunk);
         }
         else {
@@ -1630,17 +1644,18 @@ dht_selfheal_layout_new_directory (call_frame_t *frame, loc_t *loc,
                 else {
                         curr_size = 1;
                 }
+                range_size = chunk * curr_size;
                 gf_msg_debug (this->name, 0,
                               "assigning range size 0x%x to %s",
-                              chunk * curr_size,
+                              range_size,
                               layout->list[i].xlator->name);
-                DHT_SET_LAYOUT_RANGE(layout, i, start, chunk * curr_size,
+                DHT_SET_LAYOUT_RANGE(layout, i, start, range_size,
                                      loc->path);
                 if (++bricks_used >= bricks_to_use) {
                         layout->list[i].stop = 0xffffffff;
                         goto done;
                 }
-                start += (chunk * curr_size);
+                start += range_size;
         }
 
 done:

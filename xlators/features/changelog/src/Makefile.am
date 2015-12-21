@@ -4,9 +4,10 @@ xlatordir = $(libdir)/glusterfs/$(PACKAGE_VERSION)/xlator/features
 
 noinst_HEADERS = changelog-helpers.h changelog-mem-types.h changelog-rt.h \
 		 changelog-rpc-common.h changelog-misc.h changelog-encoders.h \
-		 changelog-rpc-common.h changelog-rpc.h changelog-ev-handle.h
+		 changelog-rpc-common.h changelog-rpc.h changelog-ev-handle.h \
+		 changelog-messages.h
 
-changelog_la_LDFLAGS = -module -avoid-version
+changelog_la_LDFLAGS = $(GF_XLATOR_DEFAULT_LDFLAGS)
 
 changelog_la_SOURCES = changelog.c changelog-rt.c changelog-helpers.c \
 		changelog-encoders.c changelog-rpc.c changelog-barrier.c \

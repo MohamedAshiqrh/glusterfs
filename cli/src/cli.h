@@ -42,6 +42,19 @@ enum argp_option_keys {
 	ARGP_PORT_KEY = 'p',
 };
 
+typedef enum {
+        COLD_BRICK_COUNT,
+        COLD_TYPE,
+        COLD_DIST_COUNT,
+        COLD_REPLICA_COUNT,
+        COLD_DISPERSE_COUNT,
+        COLD_REDUNDANCY_COUNT,
+        HOT_BRICK_COUNT,
+        HOT_TYPE,
+        HOT_REPLICA_COUNT,
+        MAX
+} values;
+
 #define GLUSTER_MODE_SCRIPT    (1 << 0)
 #define GLUSTER_MODE_ERR_FATAL (1 << 1)
 #define GLUSTER_MODE_XML       (1 << 2)
@@ -146,6 +159,7 @@ struct cli_local {
         xmlDocPtr               doc;
         int                     vol_count;
 #endif
+        gf_lock_t               lock;
 };
 
 struct cli_volume_status {
@@ -255,7 +269,11 @@ cli_cmd_volume_add_brick_parse (const char **words, int wordcount,
 
 int32_t
 cli_cmd_volume_detach_tier_parse (const char **words, int wordcount,
-                                  dict_t **options);
+                                  dict_t **options, int *question);
+
+int32_t
+cli_cmd_volume_tier_parse (const char **words, int wordcount,
+                           dict_t **options);
 
 int32_t
 cli_cmd_volume_remove_brick_parse (const char **words, int wordcount,
@@ -380,14 +398,16 @@ cli_quota_list_xml_error (cli_local_t *local, char *path,
                           char *errstr);
 
 int
-cli_quota_xml_output (cli_local_t *local, char *path, char *hl_str,
-                      char *sl_final, void *used, void *avail,
-                      char *sl, char *hl);
+cli_quota_xml_output (cli_local_t *local, char *path, int64_t hl_str,
+                      char *sl_final, int64_t sl_num, int64_t used,
+                      int64_t avail, char *sl, char *hl,
+                      gf_boolean_t limit_set);
 
 int
 cli_quota_object_xml_output (cli_local_t *local, char *path, char *sl_str,
-                             quota_limits_t *limits, quota_meta_t *used_space,
-                             int64_t avail, char *sl, char *hl);
+                             int64_t sl_val, quota_limits_t *limits,
+                             quota_meta_t *used_space, int64_t avail,
+                             char *sl, char *hl, gf_boolean_t limit_set);
 
 int
 cli_xml_output_peer_status (dict_t *dict, int op_ret, int op_errno,
@@ -420,6 +440,24 @@ cli_xml_output_vol_gsync (dict_t *dict, int op_ret, int op_errno,
                           char *op_errstr);
 int
 cli_xml_output_vol_status_tasks_detail (cli_local_t *local, dict_t *dict);
+
+int
+cli_xml_output_common (xmlTextWriterPtr writer, int op_ret, int op_errno,
+                       char *op_errstr);
+int
+cli_xml_snapshot_delete (xmlTextWriterPtr writer, xmlDocPtr doc, dict_t *dict,
+                        gf_cli_rsp *rsp);
+int
+cli_xml_snapshot_begin_composite_op (cli_local_t *local);
+
+int
+cli_xml_snapshot_end_composite_op (cli_local_t *local);
+
+int
+cli_xml_output_snap_delete_begin (cli_local_t *local, int op_ret, int op_errno,
+                                  char *op_errstr);
+int
+cli_xml_output_snap_delete_end (cli_local_t *local);
 
 int
 cli_xml_output_snap_status_begin (cli_local_t *local, int op_ret, int op_errno,

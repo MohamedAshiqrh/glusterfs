@@ -258,7 +258,7 @@ nfs3_errno_to_nfsstat3 (int errnum)
  * 0 which means something came wrong from upper layer(s). If it
  * happens by any means, then set NFS3 status to NFS3ERR_SERVERFAULT.
  */
-inline nfsstat3
+nfsstat3
 nfs3_cbk_errno_status (int32_t op_ret, int32_t op_errno)
 {
         if ((op_ret == -1) && (op_errno == 0)) {
@@ -777,7 +777,21 @@ nfs3_fill_entryp3 (gf_dirent_t *entry, struct nfs3_fh *dirfh, uint64_t devid)
 
         nfs3_fh_build_child_fh (dirfh, &entry->d_stat, &newfh);
         nfs3_map_deviceid_to_statdev (&entry->d_stat, devid);
-        ent->name_attributes = nfs3_stat_to_post_op_attr (&entry->d_stat);
+        /* *
+         * In tier volume, the readdirp send only to cold subvol
+         * which will populate in the 'T' file entries in the result.
+         * For such files an explicit stat call is required, by setting
+         * following argument client will perform the same.
+         *
+         * The inode value for 'T' files and directory is NULL, so just
+         * skip the check if it is directory.
+         */
+        if (!(IA_ISDIR(entry->d_stat.ia_type)) && (entry->inode == NULL))
+                ent->name_attributes.attributes_follow = FALSE;
+        else
+                ent->name_attributes =
+                        nfs3_stat_to_post_op_attr (&entry->d_stat);
+
         ent->name_handle = nfs3_fh_to_post_op_fh3 (&newfh);
 err:
         return ent;
@@ -3382,7 +3396,8 @@ nfs3_loglevel (int nfs_op, nfsstat3 stat) {
 }
 
 void
-nfs3_log_common_res (uint32_t xid, int op, nfsstat3 stat, int pstat)
+nfs3_log_common_res (uint32_t xid, int op, nfsstat3 stat, int pstat,
+                     const char *path)
 {
         char    errstr[1024];
         int     ll = nfs3_loglevel (op, stat);
@@ -3391,14 +3406,17 @@ nfs3_log_common_res (uint32_t xid, int op, nfsstat3 stat, int pstat)
                 return;
         nfs3_stat_to_errstr (xid, nfs3op_strings[op].str, stat, pstat, errstr, sizeof (errstr));
                 if (ll == GF_LOG_DEBUG)
-                        gf_msg_debug (GF_NFS3, 0, "%s", errstr);
+                        gf_msg_debug (GF_NFS3, 0, "%s => (%s)", path,
+                                      errstr);
                 else
-                        gf_msg (GF_NFS3, ll, errno, NFS_MSG_STAT_ERROR, "%s", errstr);
+                        gf_msg (GF_NFS3, ll, errno, NFS_MSG_STAT_ERROR,
+                                "%s => (%s)", path, errstr);
 
 }
 
 void
-nfs3_log_readlink_res (uint32_t xid, nfsstat3 stat, int pstat, char *linkpath)
+nfs3_log_readlink_res (uint32_t xid, nfsstat3 stat, int pstat, char *linkpath,
+                       const char *path)
 {
         char    errstr[1024];
         int     ll = nfs3_loglevel (NFS3_READLINK, stat);
@@ -3408,15 +3426,18 @@ nfs3_log_readlink_res (uint32_t xid, nfsstat3 stat, int pstat, char *linkpath)
 
         nfs3_stat_to_errstr (xid, "READLINK", stat, pstat, errstr, sizeof (errstr));
         if (ll == GF_LOG_DEBUG)
-                gf_msg_debug (GF_NFS3, 0, "%s, target: %s", errstr, linkpath);
+                gf_msg_debug (GF_NFS3, 0, "%s => (%s), target: %s", path,
+                              errstr, linkpath);
         else
-                gf_msg (GF_NFS3, ll, errno, NFS_MSG_STAT_ERROR, "%s, target: %s",
-                                errstr, linkpath);
+                gf_msg (GF_NFS3, ll, errno, NFS_MSG_STAT_ERROR,
+                        "%s => (%s) target: %s" , path,
+                        errstr, linkpath);
 }
 
 void
 nfs3_log_read_res (uint32_t xid, nfsstat3 stat, int pstat, count3 count,
-                   int is_eof, struct iovec *vec, int32_t veccount)
+                   int is_eof, struct iovec *vec,
+                   int32_t veccount, const char *path)
 {
         char    errstr[1024];
         int     ll = GF_LOG_DEBUG;
@@ -3427,30 +3448,31 @@ nfs3_log_read_res (uint32_t xid, nfsstat3 stat, int pstat, count3 count,
         nfs3_stat_to_errstr (xid, "READ", stat, pstat, errstr, sizeof (errstr));
         if (vec)
                 if (ll == GF_LOG_DEBUG)
-                        gf_msg (GF_NFS3, ll, errno, NFS_MSG_STAT_ERROR,
-                                        "%s, count: %"PRIu32", is_eof:"
-                                        " %d, vector: count: %d, len: %zd", errstr,
-                                        count, is_eof, veccount, vec->iov_len);
-                else
                         gf_msg_debug (GF_NFS3, 0,
-                                        "%s, count: %"PRIu32", is_eof:"
-                                        " %d, vector: count: %d, len: %zd", errstr,
-                                        count, is_eof, veccount, vec->iov_len);
+                                      "%s => (%s), count: %"PRIu32", is_eof:"
+                                      " %d, vector: count: %d, len: %zd", path,
+                                      errstr, count, is_eof, veccount,
+                                      vec->iov_len);
+                else
+                        gf_msg (GF_NFS3, ll, errno, NFS_MSG_STAT_ERROR,
+                                "%s => (%s), count: %"PRIu32", is_eof:"
+                                " %d, vector: count: %d, len: %zd", path,
+                                errstr, count, is_eof, veccount, vec->iov_len);
         else
                 if (ll == GF_LOG_DEBUG)
                         gf_msg_debug (GF_NFS3, 0,
-                                        "%s, count: %"PRIu32", is_eof:"
-                                        " %d", errstr, count, is_eof);
+                                      "%s => (%s), count: %"PRIu32", is_eof:"
+                                      " %d", path, errstr, count, is_eof);
                 else
                         gf_msg (GF_NFS3, ll, errno, NFS_MSG_STAT_ERROR,
-                                        "%s, count: %"PRIu32", is_eof:"
-                                        " %d", errstr, count, is_eof);
+                                "%s => (%s), count: %"PRIu32", is_eof:"
+                                " %d", path, errstr, count, is_eof);
 
 }
 
 void
 nfs3_log_write_res (uint32_t xid, nfsstat3 stat, int pstat, count3 count,
-                    int stable, uint64_t wverf)
+                    int stable, uint64_t wverf, const char *path)
 {
         char    errstr[1024];
         int     ll = nfs3_loglevel (NFS3_WRITE, stat);
@@ -3461,19 +3483,19 @@ nfs3_log_write_res (uint32_t xid, nfsstat3 stat, int pstat, count3 count,
         nfs3_stat_to_errstr (xid, "WRITE", stat, pstat, errstr, sizeof (errstr));
         if (ll == GF_LOG_DEBUG)
                 gf_msg_debug (GF_NFS3, 0,
-                                "%s, count: %"PRIu32", %s,wverf: %"PRIu64
-                                , errstr, count, (stable == UNSTABLE)?"UNSTABLE":"STABLE",
-                                wverf);
+                              "%s => (%s), count: %"PRIu32", %s,wverf: "
+                              "%"PRIu64, path, errstr, count,
+                              (stable == UNSTABLE)?"UNSTABLE":"STABLE", wverf);
         else
                 gf_msg (GF_NFS3, ll, errno, NFS_MSG_STAT_ERROR,
-                                "%s, count: %"PRIu32", %s,wverf: %"PRIu64
-                                , errstr, count, (stable == UNSTABLE)?"UNSTABLE":"STABLE",
-                                wverf);
+                        "%s => (%s), count: %"PRIu32", %s,wverf: %"PRIu64
+                        , path, errstr, count,
+                        (stable == UNSTABLE)?"UNSTABLE":"STABLE", wverf);
 }
 
 void
 nfs3_log_newfh_res (uint32_t xid, int op, nfsstat3 stat, int pstat,
-                    struct nfs3_fh *newfh)
+                    struct nfs3_fh *newfh, const char *path)
 {
         char    errstr[1024];
         char    fhstr[1024];
@@ -3485,15 +3507,16 @@ nfs3_log_newfh_res (uint32_t xid, int op, nfsstat3 stat, int pstat,
         nfs3_fh_to_str (newfh, fhstr, sizeof (fhstr));
 
         if (ll == GF_LOG_DEBUG)
-                gf_msg_debug (GF_NFS3, 0, "%s, %s", errstr, fhstr);
+                gf_msg_debug (GF_NFS3, 0, "%s => (%s), %s", path, errstr,
+                              fhstr);
         else
                 gf_msg (GF_NFS3, nfs3_loglevel (op, stat), errno, NFS_MSG_STAT_ERROR,
-                                "%s, %s", errstr, fhstr);
+                        "%s => (%s), %s", path, errstr, fhstr);
 }
 
 void
 nfs3_log_readdir_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t cverf,
-                      count3 count, int is_eof)
+                      count3 count, int is_eof, const char *path)
 {
         char    errstr[1024];
         int     ll = nfs3_loglevel (NFS3_READDIR, stat);
@@ -3503,17 +3526,19 @@ nfs3_log_readdir_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t cverf,
         nfs3_stat_to_errstr (xid, "READDIR", stat, pstat, errstr, sizeof (errstr));
         if (ll == GF_LOG_DEBUG)
                 gf_msg_debug (GF_NFS3, 0,
-                                "%s, count: %"PRIu32", cverf: %"PRIu64
-                                ", is_eof: %d", errstr, count, cverf, is_eof);
+                              "%s => (%s), count: %"PRIu32", cverf: %"PRIu64
+                              ", is_eof: %d", path, errstr, count, cverf,
+                              is_eof);
         else
                 gf_msg (GF_NFS3, ll, errno, NFS_MSG_STAT_ERROR,
-                                "%s, count: %"PRIu32", cverf: %"PRIu64
-                                ", is_eof: %d", errstr, count, cverf, is_eof);
+                        "%s => (%s), count: %"PRIu32", cverf: %"PRIu64
+                        ", is_eof: %d", path, errstr, count, cverf, is_eof);
 }
 
 void
 nfs3_log_readdirp_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t cverf,
-                       count3 dircount, count3 maxcount, int is_eof)
+                       count3 dircount, count3 maxcount, int is_eof,
+                       const char *path)
 {
         char    errstr[1024];
         int	ll = nfs3_loglevel (NFS3_READDIRP, stat);
@@ -3523,19 +3548,20 @@ nfs3_log_readdirp_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t cverf,
         nfs3_stat_to_errstr (xid, "READDIRPLUS", stat, pstat, errstr, sizeof (errstr));
         if (ll == GF_LOG_DEBUG)
                 gf_msg_debug (GF_NFS3, 0,
-                                "%s, dircount: %"PRIu32", maxcount: %"
-                                PRIu32", cverf: %"PRIu64", is_eof: %d", errstr, dircount,
-                                maxcount, cverf, is_eof);
+                              "%s => (%s), dircount: %"PRIu32", maxcount: %"
+                              PRIu32", cverf: %"PRIu64", is_eof: %d", path,
+                              errstr, dircount, maxcount, cverf, is_eof);
         else
                 gf_msg (GF_NFS3, ll, errno, NFS_MSG_STAT_ERROR,
-                                "%s, dircount: %"PRIu32", maxcount: %"
-                                PRIu32", cverf: %"PRIu64", is_eof: %d", errstr, dircount,
-                                maxcount, cverf, is_eof);
+                        "%s => (%s), dircount: %"PRIu32", maxcount: %"
+                        PRIu32", cverf: %"PRIu64", is_eof: %d", path, errstr,
+                        dircount, maxcount, cverf, is_eof);
 
 }
 
 void
-nfs3_log_commit_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t wverf)
+nfs3_log_commit_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t wverf,
+                     const char *path)
 {
         char    errstr[1024];
         int	ll = nfs3_loglevel (NFS3_COMMIT, stat);
@@ -3544,11 +3570,11 @@ nfs3_log_commit_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t wverf)
                 return;
         nfs3_stat_to_errstr (xid, "COMMIT", stat, pstat, errstr, sizeof (errstr));
         if (ll == GF_LOG_DEBUG)
-                gf_msg_debug (GF_NFS3, 0, "%s, wverf: %"PRIu64,
-                                errstr, wverf);
+                gf_msg_debug (GF_NFS3, 0, "%s => (%s), wverf: %"PRIu64,
+                              path, errstr, wverf);
         else
                 gf_msg (GF_NFS3, ll, errno, NFS_MSG_STAT_ERROR,
-                                "%s, wverf: %"PRIu64, errstr, wverf);
+                        "%s => (%s), wverf: %"PRIu64, path, errstr, wverf);
 
 }
 
@@ -3936,7 +3962,7 @@ __nfs3_fh_auth_get_peer (const rpcsvc_request_t *req, char *peer)
  *          -EACCES for completely unauthorized fop
  *          -EROFS  for unauthorized write operations (rm, mkdir, write)
  */
-inline int
+int
 nfs3_fh_auth_nfsop (nfs3_call_state_t *cs, gf_boolean_t is_write_op)
 {
         struct nfs_state    *nfs = NULL;

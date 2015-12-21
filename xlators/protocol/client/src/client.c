@@ -50,7 +50,7 @@ out:
         return 0;
 }
 
-static int
+int
 client_notify_dispatch_uniq (xlator_t *this, int32_t event, void *data, ...)
 {
         clnt_conf_t     *conf = this->private;
@@ -177,9 +177,13 @@ int32_t
 client_register_grace_timer (xlator_t *this, clnt_conf_t *conf)
 {
         int32_t  ret = -1;
+        struct timespec grace_ts = {0, };
 
         GF_VALIDATE_OR_GOTO ("client", this, out);
         GF_VALIDATE_OR_GOTO (this->name, conf, out);
+
+        grace_ts.tv_sec = conf->grace_timeout;
+        grace_ts.tv_nsec = 0;
 
         pthread_mutex_lock (&conf->lock);
         {
@@ -196,7 +200,7 @@ client_register_grace_timer (xlator_t *this, clnt_conf_t *conf)
 
                         conf->grace_timer =
                                 gf_timer_call_after (this->ctx,
-                                                     conf->grace_ts,
+                                                     grace_ts,
                                                      client_grace_timeout,
                                                      conf->rpc);
                 }
@@ -224,8 +228,6 @@ client_submit_request (xlator_t *this, void *req, call_frame_t *frame,
         struct iobref  *new_iobref = NULL;
         ssize_t         xdr_size   = 0;
         struct rpc_req  rpcreq     = {0, };
-        uint64_t        ngroups    = 0;
-        uint64_t        gid        = 0;
 
         GF_VALIDATE_OR_GOTO ("client", this, out);
         GF_VALIDATE_OR_GOTO (this->name, prog, out);
@@ -296,14 +298,11 @@ client_submit_request (xlator_t *this, void *req, call_frame_t *frame,
 
         /* do not send all groups if they are resolved server-side */
         if (!conf->send_gids) {
-                /* copy some values for restoring later */
-                ngroups = frame->root->ngrps;
-                frame->root->ngrps = 1;
-                if (ngroups <= SMALL_GROUP_COUNT) {
-                        gid = frame->root->groups_small[0];
+                if (frame->root->ngrps <= SMALL_GROUP_COUNT) {
                         frame->root->groups_small[0] = frame->root->gid;
                         frame->root->groups = frame->root->groups_small;
                 }
+                frame->root->ngrps = 1;
         }
 
         /* Send the msg */
@@ -313,13 +312,6 @@ client_submit_request (xlator_t *this, void *req, call_frame_t *frame,
 
         if (ret < 0) {
                 gf_msg_debug (this->name, 0, "rpc_clnt_submit failed");
-        }
-
-        if (!conf->send_gids) {
-                /* restore previous values */
-                frame->root->ngrps = ngroups;
-                if (ngroups <= SMALL_GROUP_COUNT)
-                        frame->root->groups_small[0] = gid;
         }
 
         ret = 0;
@@ -1977,27 +1969,14 @@ client_rpc_notify (struct rpc_clnt *rpc, void *mydata, rpc_clnt_event_t event,
         {
                 conf->connected = 1;
                 // connect happened, send 'get_supported_versions' mop
-                ret = dict_get_str (this->options, "disable-handshake",
-                                    &handshake);
 
                 gf_msg_debug (this->name, 0, "got RPC_CLNT_CONNECT");
 
-                if ((ret < 0) || (strcasecmp (handshake, "on"))) {
-                        ret = client_handshake (this, rpc);
-                        if (ret)
-                                gf_msg (this->name, GF_LOG_WARNING, 0,
-                                        PC_MSG_HANDSHAKE_RETURN, "handshake "
-                                        "msg returned %d", ret);
-                } else {
-                        //conf->rpc->connected = 1;
-                        ret = client_notify_dispatch_uniq (this,
-                                                           GF_EVENT_CHILD_UP,
-                                                           NULL);
-                        if (ret)
-                                gf_msg (this->name, GF_LOG_INFO, 0,
-                                        PC_MSG_CHILD_UP_NOTIFY_FAILED,
-                                        "CHILD_UP notify failed");
-                }
+                ret = client_handshake (this, rpc);
+                if (ret)
+                        gf_msg (this->name, GF_LOG_WARNING, 0,
+                                PC_MSG_HANDSHAKE_RETURN, "handshake "
+                                "msg returned %d", ret);
 
                 /* Cancel grace timer if set */
                 pthread_mutex_lock (&conf->lock);
@@ -2020,6 +1999,8 @@ client_rpc_notify (struct rpc_clnt *rpc, void *mydata, rpc_clnt_event_t event,
                 break;
         }
         case RPC_CLNT_DISCONNECT:
+                gf_msg_debug (this->name, 0, "got RPC_CLNT_DISCONNECT");
+
                 if (!conf->lk_heal)
                         client_mark_fd_bad (this);
                 else
@@ -2281,7 +2262,7 @@ client_init_rpc (xlator_t *this)
                 goto out;
         }
 
-        conf->rpc = rpc_clnt_new (this->options, this->ctx, this->name, 0);
+        conf->rpc = rpc_clnt_new (this->options, this, this->name, 0);
         if (!conf->rpc) {
                 gf_msg (this->name, GF_LOG_ERROR, 0, PC_MSG_RPC_INIT_FAILED,
                         "failed to initialize RPC");
@@ -2318,36 +2299,22 @@ int
 client_init_grace_timer (xlator_t *this, dict_t *options,
                          clnt_conf_t *conf)
 {
-        char      timestr[64]    = {0,};
-        char     *lk_heal        = NULL;
         int32_t   ret            = -1;
-        int32_t   grace_timeout  = -1;
 
         GF_VALIDATE_OR_GOTO ("client", this, out);
         GF_VALIDATE_OR_GOTO (this->name, options, out);
         GF_VALIDATE_OR_GOTO (this->name, conf, out);
 
-        conf->lk_heal = _gf_false;
-
-        ret = dict_get_str (options, "lk-heal", &lk_heal);
-        if (!ret)
-                gf_string2boolean (lk_heal, &conf->lk_heal);
+        GF_OPTION_RECONF ("lk-heal", conf->lk_heal, options, bool, out);
 
         gf_msg_debug (this->name, 0, "lk-heal = %s",
                       (conf->lk_heal) ? "on" : "off");
 
-        ret = dict_get_int32 (options, "grace-timeout", &grace_timeout);
-        if (!ret)
-                conf->grace_ts.tv_sec = grace_timeout;
-        else
-                conf->grace_ts.tv_sec = 10;
+        GF_OPTION_RECONF ("grace-timeout", conf->grace_timeout,
+                                                options, uint32, out);
 
-        conf->grace_ts.tv_nsec  = 0;
-
-        gf_time_fmt (timestr, sizeof timestr, conf->grace_ts.tv_sec,
-                     gf_timefmt_s);
-        gf_msg_debug (this->name, 0, "Client grace timeout value = %s",
-                      timestr);
+        gf_msg_debug (this->name, 0, "Client grace timeout value = %d",
+                                conf->grace_timeout);
 
         ret = 0;
 out:
@@ -2369,21 +2336,22 @@ client_check_event_threads (xlator_t *this, clnt_conf_t *conf, int32_t old,
 int
 reconfigure (xlator_t *this, dict_t *options)
 {
-	clnt_conf_t *conf              = NULL;
-	int          ret               = -1;
-        int          subvol_ret        = 0;
-        char        *old_remote_subvol = NULL;
-        char        *new_remote_subvol = NULL;
-        char        *old_remote_host   = NULL;
-        char        *new_remote_host   = NULL;
-        int32_t      new_nthread       = 0;
+	clnt_conf_t *conf                       = NULL;
+	int          ret                        = -1;
+        int          subvol_ret                 = 0;
+        char        *old_remote_subvol          = NULL;
+        char        *new_remote_subvol          = NULL;
+        char        *old_remote_host            = NULL;
+        char        *new_remote_host            = NULL;
+        int32_t      new_nthread                = 0;
+        struct rpc_clnt_config rpc_config       = {0,};
 
 	conf = this->private;
 
         GF_OPTION_RECONF ("frame-timeout", conf->rpc_conf.rpc_timeout,
                           options, int32, out);
 
-        GF_OPTION_RECONF ("ping-timeout", conf->opt.ping_timeout,
+        GF_OPTION_RECONF ("ping-timeout", rpc_config.ping_timeout,
                           options, int32, out);
 
         GF_OPTION_RECONF ("event-threads", new_nthread, options,
@@ -2424,6 +2392,10 @@ reconfigure (xlator_t *this, dict_t *options)
                         }
                 }
         }
+
+        /* Reconfiguring client xlator's @rpc with new frame-timeout
+         * and ping-timeout */
+        rpc_clnt_reconfig (conf->rpc, &rpc_config);
 
         GF_OPTION_RECONF ("filter-O_DIRECT", conf->filter_o_direct,
                           options, bool, out);

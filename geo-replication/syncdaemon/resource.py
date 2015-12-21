@@ -42,7 +42,7 @@ from gsyncdstatus import GeorepStatus
 
 
 UrlRX = re.compile('\A(\w+)://([^ *?[]*)\Z')
-HostRX = re.compile('[a-z\d](?:[a-z\d.-]*[a-z\d])?', re.I)
+HostRX = re.compile('[a-zA-Z\d](?:[a-zA-Z\d.-]*[a-zA-Z\d])?', re.I)
 UserRX = re.compile("[\w!\#$%&'*+-\/=?^_`{|}~]+")
 
 
@@ -717,8 +717,14 @@ class Server(object):
                 st = lstat(entry)
                 if isinstance(st, int):
                     if e['stat'] and not stat.S_ISDIR(e['stat']['mode']):
-                        (pg, bname) = entry2pb(en)
-                        blob = entry_pack_reg_stat(gfid, bname, e['stat'])
+                        if stat.S_ISLNK(e['stat']['mode']) and \
+                           e['link'] is not None:
+                            (pg, bname) = entry2pb(en)
+                            blob = entry_pack_symlink(gfid, bname,
+                                                      e['link'], e['stat'])
+                        else:
+                            (pg, bname) = entry2pb(en)
+                            blob = entry_pack_reg_stat(gfid, bname, e['stat'])
                 else:
                     cmd_ret = errno_wrap(os.rename,
                                          [entry, en],
@@ -958,8 +964,9 @@ class SlaveRemote(object):
         logging.debug("files: " + ", ".join(files))
         (host, rdir) = slaveurl.split(':')
         tar_cmd = ["tar"] + \
-            ["-cf", "-", "--files-from", "-"]
+            ["--sparse", "-cf", "-", "--files-from", "-"]
         ssh_cmd = gconf.ssh_command_tar.split() + \
+            ["-p", str(gconf.ssh_port)] + \
             [host, "tar"] + \
             ["--overwrite", "-xf", "-", "-C", rdir]
         p0 = Popen(tar_cmd, stdout=subprocess.PIPE,
@@ -1394,8 +1401,6 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
             # g3 ==> changelog History
             changelog_register_failed = False
             (inf, ouf, ra, wa) = gconf.rpc_fd.split(',')
-            os.close(int(ra))
-            os.close(int(wa))
             changelog_agent = RepceClient(int(inf), int(ouf))
             status = GeorepStatus(gconf.state_file, gconf.local_path)
             status.reset_on_worker_start()
@@ -1542,8 +1547,9 @@ class SSH(AbstractUrl, SlaveRemote):
                                  self.inner_rsc.url)
 
         deferred = go_daemon == 'postconn'
-        ret = sup(self, gconf.ssh_command.split() + gconf.ssh_ctl_args +
-                  [self.remote_addr],
+        ret = sup(self, gconf.ssh_command.split() +
+                  ["-p", str(gconf.ssh_port)] +
+                  gconf.ssh_ctl_args + [self.remote_addr],
                   slave=self.inner_rsc.url, deferred=deferred)
 
         if deferred:
@@ -1567,7 +1573,9 @@ class SSH(AbstractUrl, SlaveRemote):
 
     def rsync(self, files):
         return sup(self, files, '-e',
-                   " ".join(gconf.ssh_command.split() + gconf.ssh_ctl_args),
+                   " ".join(gconf.ssh_command.split() +
+                            ["-p", str(gconf.ssh_port)] +
+                            gconf.ssh_ctl_args),
                    *(gconf.rsync_ssh_options.split() + [self.slaveurl]))
 
     def tarssh(self, files):

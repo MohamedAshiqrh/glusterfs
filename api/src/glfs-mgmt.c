@@ -855,15 +855,25 @@ glfs_mgmt_init (struct glfs *fs)
 	if (cmd_args->volfile_server_port)
 		port = cmd_args->volfile_server_port;
 
-	host = "localhost";
-	if (cmd_args->volfile_server)
+	if (cmd_args->volfile_server) {
 		host = cmd_args->volfile_server;
+        } else if (cmd_args->volfile_server_transport &&
+                   !strcmp (cmd_args->volfile_server_transport, "unix")) {
+                host = DEFAULT_GLUSTERD_SOCKFILE;
+        } else {
+                host = "localhost";
+        }
 
-	ret = rpc_transport_inet_options_build (&options, host, port);
+        if (!strcmp (cmd_args->volfile_server_transport, "unix")) {
+                ret = rpc_transport_unix_options_build (&options, host, 0);
+        } else {
+                ret = rpc_transport_inet_options_build (&options, host, port);
+        }
+
 	if (ret)
 		goto out;
 
-	rpc = rpc_clnt_new (options, ctx, THIS->name, 8);
+	rpc = rpc_clnt_new (options, THIS, THIS->name, 8);
 	if (!rpc) {
 		ret = -1;
 		gf_msg (THIS->name, GF_LOG_WARNING, 0,

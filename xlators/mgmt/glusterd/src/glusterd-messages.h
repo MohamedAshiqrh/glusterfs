@@ -40,7 +40,9 @@
  */
 
 #define GLUSTERD_COMP_BASE      GLFS_MSGID_GLUSTERD
-#define GLFS_NUM_MESSAGES       568
+
+#define GLFS_NUM_MESSAGES       573
+
 #define GLFS_MSGID_END          (GLUSTERD_COMP_BASE + GLFS_NUM_MESSAGES + 1)
 /* Messaged with message IDs */
 #define glfs_msg_start_x GLFS_COMP_BASE, "Invalid: Start of messages"
@@ -771,7 +773,7 @@
  * @recommendedaction
  *
  */
-#define GD_MSG_SNAPSHOT_OP_SUCCESS      (GLUSTERD_COMP_BASE + 91)
+#define GD_MSG_OP_SUCCESS      (GLUSTERD_COMP_BASE + 91)
 
 /*!
  * @messageid
@@ -4588,6 +4590,48 @@
  *
  */
 #define GD_MSG_SVC_STOP_SUCCESS                     (GLUSTERD_COMP_BASE + 568)
+
+/*!
+ * @messageid
+ * @diagnosis
+ * @recommendedaction
+ *
+ */
+#define GD_MSG_PARAM_NULL                           (GLUSTERD_COMP_BASE + 569)
+
+/*!
+ * @messageid
+ * @diagnosis
+ * @recommendedaction
+ *
+ */
+#define GD_MSG_SVC_STOP_FAIL                        (GLUSTERD_COMP_BASE + 570)
+
+/*!
+ * @messageid
+ * @diagnosis
+ * @recommendedaction
+ *
+ */
+
+#define GD_MSG_SHARED_STORAGE_DOES_NOT_EXIST        (GLUSTERD_COMP_BASE + 571)
+
+/*!
+ * @messageid
+ * @diagnosis
+ * @recommendedaction
+ *
+ */
+
+#define GD_MSG_SNAP_PAUSE_TIER_FAIL                 (GLUSTERD_COMP_BASE + 572)
+
+/*!
+ * @messageid
+ * @diagnosis
+ * @recommendedaction
+ *
+ */
+#define GD_MSG_SNAP_RESUME_TIER_FAIL                (GLUSTERD_COMP_BASE + 573)
 
 /*------------*/
 #define glfs_msg_end_x GLFS_MSGID_END, "Invalid: End of messages"

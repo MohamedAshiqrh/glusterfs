@@ -614,7 +614,7 @@ qr_readv (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
 	if (!qr_inode)
 		goto wind;
 
-	if (qr_readv_cached (frame, qr_inode, size, offset, flags, xdata) <= 0)
+	if (qr_readv_cached (frame, qr_inode, size, offset, flags, xdata) < 0)
 		goto wind;
 
 	return 0;
@@ -1067,8 +1067,9 @@ qr_inode_table_destroy (qr_private_t *priv)
                  * that is fixed, log the assert as warning.
                 GF_ASSERT (list_empty (&priv->table.lru[i]));*/
                 if (!list_empty (&priv->table.lru[i])) {
-                        gf_log ("quick-read", GF_LOG_INFO,
-                               "quick read inode table lru not empty");
+                        gf_msg ("quick-read", GF_LOG_INFO, 0,
+                                QUICK_READ_MSG_LRU_NOT_EMPTY,
+                                "quick read inode table lru not empty");
                 }
         }
 

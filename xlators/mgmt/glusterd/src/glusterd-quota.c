@@ -229,6 +229,7 @@ glusterd_quota_initiate_fs_crawl (glusterd_conf_t *priv, char *volname,
         char                       mountdir[]        = "/tmp/mntXXXXXX";
         char                       logfile[PATH_MAX] = {0,};
         runner_t                   runner            = {0};
+        char                       *volfileserver    = NULL;
 
         if (mkdtemp (mountdir) == NULL) {
                 gf_msg_debug ("glusterd", 0,
@@ -239,9 +240,13 @@ glusterd_quota_initiate_fs_crawl (glusterd_conf_t *priv, char *volname,
         snprintf (logfile, sizeof (logfile),
                   DEFAULT_LOG_FILE_DIRECTORY"/%s-quota-crawl.log", volname);
 
+        if (dict_get_str (THIS->options, "transport.socket.bind-address",
+                          &volfileserver) != 0)
+                volfileserver = "localhost";
+
         runinit (&runner);
         runner_add_args (&runner, SBIN_DIR"/glusterfs",
-                         "-s", "localhost",
+                         "-s", volfileserver,
                          "--volfile-id", volname,
 			 "--use-readdirp=no",
                          "--client-pid", QUOTA_CRAWL_PID,
@@ -764,7 +769,7 @@ glusterd_copy_to_tmp_file (int src_fd, int dst_fd)
         this = THIS;
         GF_ASSERT (this);
 
-        while ((bytes_read = read (src_fd, (void *)&buf, entry_sz)) > 0) {
+        while ((bytes_read = sys_read (src_fd, (void *)&buf, entry_sz)) > 0) {
                 if (bytes_read % 16 != 0) {
                         gf_msg (this->name, GF_LOG_ERROR, 0,
                                 GD_MSG_QUOTA_CONF_CORRUPT, "quota.conf "
@@ -772,7 +777,7 @@ glusterd_copy_to_tmp_file (int src_fd, int dst_fd)
                         ret = -1;
                         goto out;
                 }
-                ret = write (dst_fd, (void *) buf, bytes_read);
+                ret = sys_write (dst_fd, (void *) buf, bytes_read);
                 if (ret == -1) {
                         gf_msg (this->name, GF_LOG_ERROR, errno,
                                 GD_MSG_QUOTA_CONF_WRITE_FAIL,
@@ -834,7 +839,7 @@ glusterd_store_quota_conf_upgrade (glusterd_volinfo_t *volinfo)
 
 out:
         if (conf_fd != -1)
-                close (conf_fd);
+                sys_close (conf_fd);
 
         if (ret && (fd > 0)) {
                 gf_store_unlink_tmppath (volinfo->quota_conf_shandle);
@@ -906,7 +911,7 @@ glusterd_store_quota_config (glusterd_volinfo_t *volinfo, char *path,
 
         if (version < 1.2f && conf->op_version >= GD_OP_VERSION_3_7_0) {
                 /* Upgrade quota.conf file to newer format */
-                close (conf_fd);
+                sys_close (conf_fd);
                 ret = glusterd_store_quota_conf_upgrade(volinfo);
                 if (ret)
                         goto out;
@@ -959,7 +964,7 @@ glusterd_store_quota_config (glusterd_volinfo_t *volinfo, char *path,
                 type = GF_QUOTA_CONF_TYPE_USAGE;
 
         for (;;) {
-                bytes_read = read (conf_fd, (void *)&buf, sizeof (buf));
+                bytes_read = sys_read (conf_fd, (void *)&buf, sizeof (buf));
                 if (bytes_read <= 0) {
                         /*The flag @is_first_read is TRUE when the loop is
                          * entered, and is set to false if the first read
@@ -983,7 +988,7 @@ glusterd_store_quota_config (glusterd_volinfo_t *volinfo, char *path,
                 found = glusterd_find_gfid_match (gfid, type, buf, bytes_read,
                                                   opcode, &bytes_to_write);
 
-                ret = write (fd, (void *) buf, bytes_to_write);
+                ret = sys_write (fd, (void *) buf, bytes_to_write);
                 if (ret == -1) {
                         gf_msg (this->name, GF_LOG_ERROR, errno,
                                 GD_MSG_QUOTA_CONF_WRITE_FAIL,
@@ -1065,7 +1070,7 @@ glusterd_store_quota_config (glusterd_volinfo_t *volinfo, char *path,
         ret = 0;
 out:
         if (conf_fd != -1) {
-                close (conf_fd);
+                sys_close (conf_fd);
         }
 
         if (ret && (fd > 0)) {
@@ -1207,8 +1212,7 @@ glusterd_remove_quota_limit (char *volname, char *path, char **op_errstr,
         }
 
         if (type == GF_QUOTA_OPTION_TYPE_REMOVE) {
-                ret = sys_lremovexattr (abspath,
-                                        "trusted.glusterfs.quota.limit-set");
+                ret = sys_lremovexattr (abspath, QUOTA_LIMIT_KEY);
                 if (ret) {
                         gf_asprintf (op_errstr, "removexattr failed on %s. "
                                      "Reason : %s", abspath, strerror (errno));
@@ -1217,8 +1221,7 @@ glusterd_remove_quota_limit (char *volname, char *path, char **op_errstr,
         }
 
         if (type == GF_QUOTA_OPTION_TYPE_REMOVE_OBJECTS) {
-                ret = sys_lremovexattr (abspath,
-                                "trusted.glusterfs.quota.limit-objects");
+                ret = sys_lremovexattr (abspath, QUOTA_LIMIT_OBJECTS_KEY);
                 if (ret) {
                         gf_asprintf (op_errstr, "removexattr failed on %s. "
                                      "Reason : %s", abspath, strerror (errno));
@@ -1494,18 +1497,32 @@ glusterd_op_quota (dict_t *dict, char **op_errstr, dict_t *rsp_dict)
                         goto out;
         }
 
+
+        if (GF_QUOTA_OPTION_TYPE_ENABLE == type)
+                volinfo->quota_xattr_version++;
+        ret = glusterd_store_volinfo (volinfo,
+                                      GLUSTERD_VOLINFO_VER_AC_INCREMENT);
+        if (ret) {
+                if (GF_QUOTA_OPTION_TYPE_ENABLE == type)
+                        volinfo->quota_xattr_version--;
+                goto out;
+        }
+
         ret = glusterd_create_volfiles_and_notify_services (volinfo);
         if (ret) {
                 gf_msg (this->name, GF_LOG_ERROR, 0,
                         GD_MSG_VOLFILE_CREATE_FAIL, "Unable to re-create "
                                                   "volfiles");
+                if (GF_QUOTA_OPTION_TYPE_ENABLE == type) {
+                        /* rollback volinfo */
+                        volinfo->quota_xattr_version--;
+                        ret = glusterd_store_volinfo (volinfo,
+                                      GLUSTERD_VOLINFO_VER_AC_INCREMENT);
+                }
+
                 ret = -1;
                 goto out;
         }
-
-        ret = glusterd_store_volinfo (volinfo, GLUSTERD_VOLINFO_VER_AC_INCREMENT);
-        if (ret)
-                goto out;
 
         if (GLUSTERD_STATUS_STARTED == volinfo->status) {
                 if (priv->op_version == GD_OP_VERSION_MIN)

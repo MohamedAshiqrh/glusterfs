@@ -55,6 +55,66 @@ mem_acct_init (xlator_t *this)
 }
 
 int32_t
+br_stub_bad_object_container_init (xlator_t *this, br_stub_private_t *priv)
+{
+        pthread_attr_t  w_attr;
+        int32_t         ret          = -1;
+
+        ret = pthread_cond_init(&priv->container.bad_cond, NULL);
+        if (ret != 0) {
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        BRS_MSG_BAD_OBJ_THREAD_FAIL,
+                        "pthread_cond_init failed (%d)", ret);
+                goto out;
+        }
+
+        ret = pthread_mutex_init(&priv->container.bad_lock, NULL);
+        if (ret != 0) {
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        BRS_MSG_BAD_OBJ_THREAD_FAIL,
+                        "pthread_mutex_init failed (%d)", ret);
+                goto cleanup_cond;
+        }
+
+        ret = pthread_attr_init (&w_attr);
+        if (ret != 0) {
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        BRS_MSG_BAD_OBJ_THREAD_FAIL,
+                        "pthread_attr_init failed (%d)", ret);
+                goto cleanup_lock;
+        }
+
+        ret = pthread_attr_setstacksize (&w_attr, BAD_OBJECT_THREAD_STACK_SIZE);
+        if (ret == EINVAL) {
+                gf_msg (this->name, GF_LOG_WARNING, 0,
+                        BRS_MSG_BAD_OBJ_THREAD_FAIL,
+                        "Using default thread stack size");
+        }
+
+        INIT_LIST_HEAD (&priv->container.bad_queue);
+        ret = br_stub_dir_create (this, priv);
+        if (ret < 0)
+                goto cleanup_lock;
+
+        ret = gf_thread_create (&priv->container.thread, &w_attr, br_stub_worker, this);
+        if (ret)
+                goto cleanup_attr;
+
+        return 0;
+
+cleanup_attr:
+        pthread_attr_destroy (&w_attr);
+cleanup_lock:
+        pthread_mutex_destroy (&priv->container.bad_lock);
+cleanup_cond:
+        pthread_cond_destroy (&priv->container.bad_cond);
+out:
+        return -1;
+}
+
+#define BR_STUB_QUARANTINE_DIR GF_HIDDEN_PATH"/quanrantine"
+
+int32_t
 init (xlator_t *this)
 {
         int32_t ret = 0;
@@ -81,6 +141,9 @@ init (xlator_t *this)
         GF_OPTION_INIT ("export", tmp, str, free_mempool);
         memcpy (priv->export, tmp, strlen (tmp) + 1);
 
+        (void) snprintf (priv->stub_basepath, PATH_MAX,
+                         "%s/%s", priv->export, BR_STUB_QUARANTINE_DIR);
+
         (void) gettimeofday (&tv, NULL);
 
         /* boot time is in network endian format */
@@ -91,12 +154,23 @@ init (xlator_t *this)
         pthread_cond_init (&priv->cond, NULL);
         INIT_LIST_HEAD (&priv->squeue);
 
-        ret = gf_thread_create (&priv->signth, NULL, br_stub_signth, priv);
+        /* Thread creations need 'this' to be passed so that THIS can be
+         * assigned inside the thread. So setting this->private here.
+         */
+        this->private = priv;
+
+        ret = gf_thread_create (&priv->signth, NULL, br_stub_signth, this);
         if (ret != 0)
                 goto cleanup_lock;
 
+        ret = br_stub_bad_object_container_init (this, priv);
+        if (ret) {
+                gf_msg (this->name, GF_LOG_ERROR, 0, BRS_MSG_BAD_CONTAINER_FAIL,
+                        "failed to launch the thread for storing bad gfids");
+                goto cleanup_lock;
+        }
+
         gf_msg_debug (this->name, 0, "bit-rot stub loaded");
-	this->private = priv;
 
         return 0;
 
@@ -107,6 +181,7 @@ init (xlator_t *this)
         mem_pool_destroy (priv->local_pool);
  free_priv:
         GF_FREE (priv);
+        this->private = NULL;
  error_return:
         return -1;
 }
@@ -117,6 +192,7 @@ fini (xlator_t *this)
         int32_t ret = 0;
 	br_stub_private_t *priv = this->private;
         struct br_stub_signentry *sigstub = NULL;
+        call_stub_t *stub = NULL;
 
         if (!priv)
                 return;
@@ -141,6 +217,24 @@ fini (xlator_t *this)
         pthread_mutex_destroy (&priv->lock);
         pthread_cond_destroy (&priv->cond);
 
+        ret = gf_thread_cleanup_xint (priv->container.thread);
+        if (ret) {
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        BRS_MSG_CANCEL_SIGN_THREAD_FAILED,
+                        "Could not cancel sign serializer thread");
+                goto out;
+        }
+
+        while (!list_empty (&priv->container.bad_queue)) {
+                stub = list_first_entry (&priv->container.bad_queue, call_stub_t,
+                                         list);
+                list_del_init (&stub->list);
+                call_stub_destroy (stub);
+        };
+
+        pthread_mutex_destroy (&priv->container.bad_lock);
+        pthread_cond_destroy (&priv->container.bad_cond);
+
         this->private = NULL;
 	GF_FREE (priv);
 
@@ -148,7 +242,7 @@ fini (xlator_t *this)
 	return;
 }
 
-static inline int
+static int
 br_stub_alloc_versions (br_version_t **obuf,
                         br_signature_t **sbuf, size_t signaturelen)
 {
@@ -178,13 +272,13 @@ br_stub_alloc_versions (br_version_t **obuf,
         return -1;
 }
 
-static inline void
+static void
 br_stub_dealloc_versions (void *mem)
 {
         GF_FREE (mem);
 }
 
-static inline br_stub_local_t *
+static br_stub_local_t *
 br_stub_alloc_local (xlator_t *this)
 {
         br_stub_private_t *priv = this->private;
@@ -192,13 +286,13 @@ br_stub_alloc_local (xlator_t *this)
         return mem_get0 (priv->local_pool);
 }
 
-static inline void
+static void
 br_stub_dealloc_local (br_stub_local_t *ptr)
 {
         mem_put (ptr);
 }
 
-static inline int
+static int
 br_stub_prepare_version_request (xlator_t *this, dict_t *dict,
                                 br_version_t *obuf, unsigned long oversion)
 {
@@ -211,7 +305,7 @@ br_stub_prepare_version_request (xlator_t *this, dict_t *dict,
                                     (void *)obuf, sizeof (br_version_t));
 }
 
-static inline int
+static int
 br_stub_prepare_signing_request (dict_t *dict,
                                  br_signature_t *sbuf,
                                  br_isignature_t *sign, size_t signaturelen)
@@ -230,7 +324,7 @@ br_stub_prepare_signing_request (dict_t *dict,
  * context, hence the inode is marked dirty. this routine also
  * initializes the transient inode version.
  */
-static inline int
+static int
 br_stub_init_inode_versions (xlator_t *this, fd_t *fd, inode_t *inode,
                              unsigned long version, gf_boolean_t markdirty,
                              gf_boolean_t bad_object)
@@ -271,7 +365,7 @@ free_ctx:
 /**
  * modify the ongoing version of an inode.
  */
-static inline int
+static int
 br_stub_mod_inode_versions (xlator_t *this,
                             fd_t *fd, inode_t *inode, unsigned long version)
 {
@@ -296,7 +390,7 @@ unblock:
         return ret;
 }
 
-static inline void
+static void
 br_stub_fill_local (br_stub_local_t *local,
                     call_stub_t *stub, fd_t *fd, inode_t *inode, uuid_t gfid,
                     int versioningtype, unsigned long memversion)
@@ -311,7 +405,7 @@ br_stub_fill_local (br_stub_local_t *local,
         gf_uuid_copy (local->u.context.gfid, gfid);
 }
 
-static inline void
+static void
 br_stub_cleanup_local (br_stub_local_t *local)
 {
         local->fopstub = NULL;
@@ -452,6 +546,40 @@ br_stub_mark_inode_modified (xlator_t *this, br_stub_local_t *local)
 }
 
 /**
+ * The possible return values from br_stub_is_bad_object () are:
+ * 1) 0  => as per the inode context object is not bad
+ * 2) -1 => Failed to get the inode context itself
+ * 3) -2 => As per the inode context object is bad
+ * Both -ve values means the fop which called this function is failed
+ * and error is returned upwards.
+ */
+static int
+br_stub_check_bad_object (xlator_t *this, inode_t *inode, int32_t *op_ret,
+                           int32_t *op_errno)
+{
+        int ret = -1;
+
+        ret = br_stub_is_bad_object (this, inode);
+        if (ret == -2) {
+                gf_msg (this->name, GF_LOG_ERROR, 0, BRS_MSG_BAD_OBJECT_ACCESS,
+                        "%s is a bad object. Returning",
+                        uuid_utoa (inode->gfid));
+                *op_ret = -1;
+                *op_errno = EIO;
+        }
+
+        if (ret == -1) {
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        BRS_MSG_GET_INODE_CONTEXT_FAILED, "could not get inode"
+                        " context for %s", uuid_utoa (inode->gfid));
+                *op_ret = -1;
+                *op_errno = EINVAL;
+        }
+
+        return ret;
+}
+
+/**
  * callback for inode/fd versioning
  */
 int
@@ -563,7 +691,7 @@ br_stub_fd_versioning (xlator_t *this, call_frame_t *frame,
         return ret;
 }
 
-static inline int
+static int
 br_stub_perform_incversioning (xlator_t *this,
                                call_frame_t *frame, call_stub_t *stub,
                                fd_t *fd, br_stub_inode_ctx_t *ctx)
@@ -634,9 +762,11 @@ br_stub_perform_objsign (call_frame_t *frame, xlator_t *this,
 void *
 br_stub_signth (void *arg)
 {
-        br_stub_private_t *priv = arg;
+        xlator_t *this = arg;
+        br_stub_private_t *priv = this->private;
         struct br_stub_signentry *sigstub = NULL;
 
+        THIS = this;
         while (1) {
                 pthread_mutex_lock (&priv->lock);
                 {
@@ -669,7 +799,7 @@ orderq (struct list_head *elem1, struct list_head *elem2)
         return (s1->v > s2->v);
 }
 
-static inline int
+static int
 br_stub_compare_sign_version (xlator_t *this,
                               inode_t *inode,
                               br_signature_t *sbuf,
@@ -719,7 +849,7 @@ br_stub_compare_sign_version (xlator_t *this,
         return ret;
 }
 
-static inline int
+static int
 br_stub_prepare_signature (xlator_t *this,
                            dict_t *dict, inode_t *inode,
                            br_isignature_t *sign, int *fakesuccess)
@@ -846,6 +976,40 @@ br_stub_fsetxattr_resume (call_frame_t *frame, void *cookie, xlator_t *this,
         return 0;
 }
 
+/**
+ * Handles object reopens. Object reopens can be of 3 types. 2 are from
+ * oneshot crawler and 1 from the regular signer.
+ * ONESHOT CRAWLER:
+ * For those objects which were created before bitrot was enabled. oneshow
+ * crawler crawls the namespace and signs all the objects. It has to do
+ * the versioning before making bit-rot-stub send a sign notification.
+ * So it sends fsetxattr with BR_OBJECT_REOPEN as the value. And bit-rot-stub
+ * upon getting BR_OBJECT_REOPEN value checks if the version has to be
+ * increased or not. By default the version will be increased. But if the
+ * object is modified before BR_OBJECT_REOPEN from oneshot crawler, then
+ * versioning need not be done. In that case simply a success is returned.
+ * SIGNER:
+ * Signer wait for 2 minutes upon getting the notification from bit-rot-stub
+ * and then it sends a dummy write (in reality a fsetxattr) call, to change
+ * the state of the inode from REOPEN_WAIT to SIGN_QUICK. The funny part here
+ * is though the inode's state is REOPEN_WAIT, the call sent by signer is
+ * BR_OBJECT_RESIGN. Once the state is changed to SIGN_QUICK, then yet another
+ * notification is sent upon release (RESIGN would have happened via fsetxattr,
+ * so a fd is needed) and the object is signed truly this time.
+ * There is a challenge in the above RESIGN method by signer. After sending
+ * the 1st notification, the inode could be forgotten before RESIGN request
+ * is received. In that case, the inode's context (the newly looked up inode)
+ * would not indicate the inode as being modified (it would be in the default
+ * state) and because of this, a SIGN_QUICK notification to truly sign the
+ * object would not be sent. So, this is how its handled.
+ * if (request == RESIGN) {
+ *    if (inode->sign_info == NORMAL) {
+ *        mark_inode_non_dirty;
+ *        mark_inode_modified;
+ *    }
+ *    GOBACK (means unwind without doing versioning)
+ * }
+ */
 static void
 br_stub_handle_object_reopen (call_frame_t *frame,
                               xlator_t *this, fd_t *fd, uint32_t val)
@@ -858,6 +1022,7 @@ br_stub_handle_object_reopen (call_frame_t *frame,
         gf_boolean_t         modified    = _gf_false;
         br_stub_inode_ctx_t *ctx         = NULL;
         br_stub_local_t     *local       = NULL;
+        gf_boolean_t         goback      = _gf_true;
 
         ret = br_stub_need_versioning (this, fd, &inc_version, &modified, &ctx);
         if (ret)
@@ -865,11 +1030,18 @@ br_stub_handle_object_reopen (call_frame_t *frame,
 
         LOCK (&fd->inode->lock);
         {
+                if ((val == BR_OBJECT_REOPEN) && inc_version)
+                        goback = _gf_false;
+                if (val == BR_OBJECT_RESIGN &&
+                    ctx->info_sign == BR_SIGN_NORMAL) {
+                        __br_stub_mark_inode_synced (ctx);
+                        __br_stub_set_inode_modified (ctx);
+                }
                 (void) __br_stub_inode_sign_state (ctx, GF_FOP_FSETXATTR, fd);
         }
         UNLOCK (&fd->inode->lock);
 
-        if ((val == BR_OBJECT_RESIGN) || !inc_version) {
+        if (goback) {
                 op_ret = op_errno = 0;
                 goto unwind;
         }
@@ -941,6 +1113,8 @@ br_stub_fsetxattr_bad_object_cbk (call_frame_t *frame, void *cookie,
                 gf_msg (this->name, GF_LOG_ERROR, 0, BRS_MSG_BAD_OBJ_MARK_FAIL,
                         "failed to mark object %s as bad",
                         uuid_utoa (local->u.context.inode->gfid));
+
+        ret = br_stub_add (this, local->u.context.inode->gfid);
 
 unwind:
         STACK_UNWIND_STRICT (fsetxattr, frame, op_ret, op_errno, xdata);
@@ -1053,6 +1227,12 @@ br_stub_fsetxattr (call_frame_t *frame, xlator_t *this,
                 goto done;
         }
 
+        if (dict_get (dict, GLUSTERFS_GET_OBJECT_SIGNATURE)) {
+                br_stub_handle_internal_xattr (frame, this, fd,
+                                               GLUSTERFS_GET_OBJECT_SIGNATURE);
+                goto done;
+        }
+
         /* object reopen request */
         ret = dict_get_uint32 (dict, BR_REOPEN_SIGN_HINT_KEY, &val);
         if (!ret) {
@@ -1093,6 +1273,7 @@ br_stub_setxattr (call_frame_t *frame, xlator_t *this,
         char    *format                    = "(%s:%s)";
 
         if (dict_get (dict, GLUSTERFS_SET_OBJECT_SIGNATURE) ||
+            dict_get (dict, GLUSTERFS_GET_OBJECT_SIGNATURE) ||
             dict_get (dict, BR_REOPEN_SIGN_HINT_KEY) ||
             dict_get (dict, BITROT_OBJECT_BAD_KEY) ||
             dict_get (dict, BITROT_SIGNING_VERSION_KEY) ||
@@ -1364,7 +1545,7 @@ br_stub_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         return 0;
 }
 
-static inline void
+static void
 br_stub_send_stub_init_time (call_frame_t *frame, xlator_t *this)
 {
         int op_ret = 0;
@@ -1537,13 +1718,16 @@ br_stub_readv (call_frame_t *frame, xlator_t *this,
 {
         int32_t              op_ret   = -1;
         int32_t              op_errno = EINVAL;
+        int32_t              ret      = -1;
 
         GF_VALIDATE_OR_GOTO ("bit-rot-stub", this, unwind);
         GF_VALIDATE_OR_GOTO (this->name, frame, unwind);
         GF_VALIDATE_OR_GOTO (this->name, fd, unwind);
         GF_VALIDATE_OR_GOTO (this->name, fd->inode, unwind);
 
-        BR_STUB_HANDLE_BAD_OBJECT (this, fd->inode, op_ret, op_errno, unwind);
+        ret = br_stub_check_bad_object (this, fd->inode, &op_ret, &op_errno);
+        if (ret)
+                goto unwind;
 
         STACK_WIND_TAIL (frame, FIRST_CHILD(this),
                          FIRST_CHILD(this)->fops->readv, fd, size, offset,
@@ -1637,7 +1821,9 @@ br_stub_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
         if (ret)
                 goto unwind;
 
-        BR_STUB_HANDLE_BAD_OBJECT (this, fd->inode, op_ret, op_errno, unwind);
+        ret = br_stub_check_bad_object (this, fd->inode, &op_ret, &op_errno);
+        if (ret)
+                goto unwind;
 
         /**
          * The inode is not dirty and also witnessed atleast one successful
@@ -1758,7 +1944,9 @@ br_stub_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd,
         if (ret)
                 goto unwind;
 
-        BR_STUB_HANDLE_BAD_OBJECT (this, fd->inode, op_ret, op_errno, unwind);
+        ret = br_stub_check_bad_object (this, fd->inode, &op_ret, &op_errno);
+        if (ret)
+                goto unwind;
 
         if (!inc_version && modified)
                 goto wind;
@@ -1890,7 +2078,9 @@ br_stub_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc,
         if (ret)
                 goto cleanup_fd;
 
-        BR_STUB_HANDLE_BAD_OBJECT (this, fd->inode, op_ret, op_errno, unwind);
+        ret = br_stub_check_bad_object (this, fd->inode, &op_ret, &op_errno);
+        if (ret)
+                goto unwind;
 
         if (!inc_version && modified)
                 goto wind;
@@ -1984,7 +2174,9 @@ br_stub_open (call_frame_t *frame, xlator_t *this,
 
         ctx = (br_stub_inode_ctx_t *)(long)ctx_addr;
 
-        BR_STUB_HANDLE_BAD_OBJECT (this, loc->inode, op_ret, op_errno, unwind);
+        ret = br_stub_check_bad_object (this, fd->inode, &op_ret, &op_errno);
+        if (ret)
+                goto unwind;
 
         if (frame->root->pid == GF_CLIENT_PID_SCRUB)
                 goto wind;
@@ -2166,8 +2358,15 @@ unwind:
  * calls can be avoided and bad objects can be caught instantly. Fetching the
  * xattr is needed only in lookups when there is a brick restart or inode
  * forget.
+ *
+ * If the dict (@xattr) is NULL, then how should that be handled? Fail the
+ * lookup operation? Or let it continue with version being initialized to
+ * BITROT_DEFAULT_CURRENT_VERSION. But what if the version was different
+ * on disk (and also a right signature was there), but posix failed to
+ * successfully allocate the dict? Posix does not treat call back xdata
+ * creattion failure as the lookup failure.
  */
-static inline int32_t
+static int32_t
 br_stub_lookup_version (xlator_t *this,
                         uuid_t gfid, inode_t *inode, dict_t *xattr)
 {
@@ -2190,12 +2389,88 @@ br_stub_lookup_version (xlator_t *this,
                    || (status == BR_VXATTR_STATUS_UNSIGNED))
                         ? obuf->ongoingversion : BITROT_DEFAULT_CURRENT_VERSION;
 
+        /**
+         * If signature is there, but version is not therem then that status is
+         * is treated as INVALID. So in that case, we should not initialize the
+         * inode context with wrong version names etc.
+         */
+        if (status == BR_VXATTR_STATUS_INVALID)
+                return -1;
+
         return br_stub_init_inode_versions (this, NULL, inode, version,
                                             _gf_true, bad_object);
 }
 
 
 /** {{{ */
+
+int32_t
+br_stub_opendir (call_frame_t *frame, xlator_t *this,
+               loc_t *loc, fd_t *fd, dict_t *xdata)
+{
+        br_stub_private_t    *priv = NULL;
+        br_stub_fd_t         *fd_ctx = NULL;
+        int32_t               op_ret = -1;
+        int32_t               op_errno = EINVAL;
+
+        priv = this->private;
+        if (gf_uuid_compare (fd->inode->gfid, priv->bad_object_dir_gfid))
+                goto normal;
+
+        fd_ctx = br_stub_fd_new ();
+        if (!fd_ctx) {
+                op_errno = ENOMEM;
+                goto unwind;
+        }
+
+        fd_ctx->bad_object.dir_eof = -1;
+        fd_ctx->bad_object.dir = sys_opendir (priv->stub_basepath);
+        if (!fd_ctx->bad_object.dir) {
+                op_errno = errno;
+                goto err_freectx;
+        }
+
+        op_ret = br_stub_fd_ctx_set (this, fd, fd_ctx);
+        if (!op_ret)
+                goto unwind;
+
+        sys_closedir (fd_ctx->bad_object.dir);
+
+err_freectx:
+        GF_FREE (fd_ctx);
+unwind:
+        STACK_UNWIND_STRICT (opendir, frame, op_ret, op_errno, fd, NULL);
+        return 0;
+
+normal:
+        STACK_WIND (frame, default_opendir_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->opendir, loc, fd, xdata);
+        return 0;
+}
+
+int32_t
+br_stub_readdir (call_frame_t *frame, xlator_t *this,
+               fd_t *fd, size_t size, off_t off, dict_t *xdata)
+{
+        call_stub_t     *stub = NULL;
+        br_stub_private_t    *priv = NULL;
+
+        priv = this->private;
+        if (gf_uuid_compare (fd->inode->gfid, priv->bad_object_dir_gfid))
+                goto out;
+        stub = fop_readdir_stub (frame, br_stub_readdir_wrapper, fd, size, off,
+                                 xdata);
+        if (!stub) {
+                STACK_UNWIND_STRICT (readdir, frame, -1, ENOMEM, NULL, NULL);
+                return 0;
+        }
+        br_stub_worker_enqueue (this, stub);
+        return 0;
+out:
+        STACK_WIND (frame, default_readdir_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->readdir, fd, size, off, xdata);
+        return 0;
+}
 
 int
 br_stub_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
@@ -2300,6 +2575,44 @@ br_stub_readdirp (call_frame_t *frame, xlator_t *this,
 
 /* lookup() */
 
+/**
+ * This function mainly handles the ENOENT error for the bad objects. Though
+ * br_stub_forget () handles removal of the link for the bad object from the
+ * quarantine directory, its better to handle it in lookup as well, where
+ * a failed lookup on a bad object with ENOENT, will trigger deletion of the
+ * link for the bad object from quarantine directory. So whoever comes first
+ * either forget () or lookup () will take care of removing the link.
+ */
+void
+br_stub_handle_lookup_error (xlator_t *this, inode_t *inode, int32_t op_errno)
+{
+        int32_t     ret = -1;
+        uint64_t   ctx_addr = 0;
+        br_stub_inode_ctx_t *ctx = NULL;
+
+        if (op_errno != ENOENT)
+                goto out;
+
+        if (!inode_is_linked (inode))
+                goto out;
+
+        ret = br_stub_get_inode_ctx (this, inode, &ctx_addr);
+        if (ret)
+                goto out;
+
+        ctx = (br_stub_inode_ctx_t *)(long)ctx_addr;
+
+        LOCK (&inode->lock);
+        {
+                if (__br_stub_is_bad_object (ctx))
+                        (void) br_stub_del (this, inode->gfid);
+        }
+        UNLOCK (&inode->lock);
+
+out:
+        return;
+}
+
 int
 br_stub_lookup_cbk (call_frame_t *frame, void *cookie,
                     xlator_t *this, int op_ret, int op_errno, inode_t *inode,
@@ -2307,8 +2620,11 @@ br_stub_lookup_cbk (call_frame_t *frame, void *cookie,
 {
         int32_t ret = 0;
 
-        if (op_ret < 0)
+        if (op_ret < 0) {
+                (void) br_stub_handle_lookup_error (this, inode, op_errno);
                 goto unwind;
+        }
+
         if (!IA_ISREG (stbuf->ia_type))
                 goto unwind;
 
@@ -2371,10 +2687,27 @@ br_stub_lookup (call_frame_t *frame,
         void *cookie = NULL;
         uint64_t ctx_addr = 0;
         gf_boolean_t xref = _gf_false;
+        br_stub_private_t *priv = NULL;
+        call_stub_t       *stub = NULL;
 
         GF_VALIDATE_OR_GOTO ("bit-rot-stub", this, unwind);
         GF_VALIDATE_OR_GOTO (this->name, loc, unwind);
         GF_VALIDATE_OR_GOTO (this->name, loc->inode, unwind);
+
+        priv = this->private;
+
+        if (!gf_uuid_compare (loc->gfid, priv->bad_object_dir_gfid) ||
+            !gf_uuid_compare (loc->pargfid, priv->bad_object_dir_gfid)) {
+
+                stub = fop_lookup_stub (frame, br_stub_lookup_wrapper, loc,
+                                        xdata);
+                if (!stub) {
+                        op_errno = ENOMEM;
+                        goto unwind;
+                }
+                br_stub_worker_enqueue (this, stub);
+                return 0;
+        }
 
         ret = br_stub_get_inode_ctx (this, loc->inode, &ctx_addr);
         if (ret < 0)
@@ -2432,6 +2765,62 @@ br_stub_lookup (call_frame_t *frame,
 
 /** {{{ */
 
+/* fstat() */
+int br_stub_fstat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                       int32_t op_ret, int32_t op_errno, struct iatt *buf,
+                       dict_t *xdata)
+{
+
+        int              ret    = 0;
+        br_stub_local_t *local  = NULL;
+        inode_t         *inode  = NULL;
+
+        local = frame->local;
+        frame->local = NULL;
+        inode = local->u.context.inode;
+
+        ret = br_stub_mark_xdata_bad_object (this, inode, xdata);
+        if (ret) {
+                op_ret = -1;
+                op_errno = EIO;
+        }
+
+        br_stub_cleanup_local(local);
+        br_stub_dealloc_local(local);
+        STACK_UNWIND_STRICT (fstat, frame, op_ret, op_errno, buf, xdata);
+        return 0;
+}
+
+int
+br_stub_fstat (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
+{
+        br_stub_local_t *local    = NULL;
+        int32_t          op_ret   = -1;
+        int32_t          op_errno = EINVAL;
+
+        local = br_stub_alloc_local (this);
+        if (!local) {
+                op_ret = -1;
+                op_errno = ENOMEM;
+                goto unwind;
+        }
+
+        br_stub_fill_local (local, NULL, fd, fd->inode, fd->inode->gfid,
+                            BR_STUB_NO_VERSIONING, 0);
+        frame->local = local;
+
+        STACK_WIND (frame, br_stub_fstat_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->fstat, fd, xdata);
+        return 0;
+unwind:
+        STACK_UNWIND_STRICT (fstat, frame, op_ret, op_errno, NULL, NULL);
+        return 0;
+}
+
+/** }}} */
+
+/** {{{ */
+
 /* forget() */
 
 int
@@ -2445,6 +2834,20 @@ br_stub_forget (xlator_t *this, inode_t *inode)
                 return 0;
 
         ctx = (br_stub_inode_ctx_t *) (long) ctx_addr;
+
+        LOCK (&inode->lock);
+        {
+                /**
+                 * Ignoring the return value of br_stub_del ().
+                 * There is not much that can be done if unlinking
+                 * of the entry in the quarantine directory fails.
+                 * The failure is logged.
+                 */
+                if (__br_stub_is_bad_object (ctx))
+                        (void) br_stub_del (this, inode->gfid);
+        }
+        UNLOCK (&inode->lock);
+
         GF_FREE (ctx);
 
         return 0;
@@ -2462,7 +2865,7 @@ br_stub_noop (call_frame_t *frame, void *cookie, xlator_t *this,
         return 0;
 }
 
-static inline void
+static void
 br_stub_send_ipc_fop (xlator_t *this, fd_t *fd, unsigned long releaseversion,
                       int sign_info)
 {
@@ -2618,6 +3021,31 @@ br_stub_release (xlator_t *this, fd_t *fd)
         return 0;
 }
 
+int32_t
+br_stub_releasedir (xlator_t *this, fd_t *fd)
+{
+        br_stub_fd_t   *fctx = NULL;
+        uint64_t        ctx  = 0;
+        int             ret  = 0;
+
+        ret = fd_ctx_del (fd, this, &ctx);
+        if (ret < 0)
+                goto out;
+
+        fctx = (br_stub_fd_t *) (long) ctx;
+        if (fctx->bad_object.dir) {
+                ret = sys_closedir (fctx->bad_object.dir);
+                if (ret)
+                        gf_msg (this->name, GF_LOG_ERROR, 0,
+                                BRS_MSG_BAD_OBJ_DIR_CLOSE_FAIL,
+                                "closedir error: %s", strerror (errno));
+        }
+
+        GF_FREE (fctx);
+out:
+        return 0;
+}
+
 /** }}} */
 
 /** {{{ */
@@ -2667,6 +3095,7 @@ unblock:
 
 struct xlator_fops fops = {
         .lookup    = br_stub_lookup,
+        .fstat     = br_stub_fstat,
         .open      = br_stub_open,
         .create    = br_stub_create,
         .readdirp  = br_stub_readdirp,
@@ -2681,6 +3110,8 @@ struct xlator_fops fops = {
         .removexattr = br_stub_removexattr,
         .fremovexattr = br_stub_fremovexattr,
         .setxattr  = br_stub_setxattr,
+        .opendir   = br_stub_opendir,
+        .readdir   = br_stub_readdir,
 };
 
 struct xlator_cbks cbks = {

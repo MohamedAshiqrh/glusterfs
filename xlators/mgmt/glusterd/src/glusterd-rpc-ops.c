@@ -58,6 +58,7 @@ glusterd_op_send_cli_response (glusterd_op_t op, int32_t op_ret,
         ctx = op_ctx;
 
         switch (op) {
+        case GD_OP_DETACH_TIER:
         case GD_OP_REMOVE_BRICK:
         {
                 if (ctx)
@@ -70,6 +71,7 @@ glusterd_op_send_cli_response (glusterd_op_t op, int32_t op_ret,
                         errstr = "Error while resetting options";
                 break;
         }
+        case GD_OP_TIER_MIGRATE:
         case GD_OP_REBALANCE:
         case GD_OP_DEFRAG_BRICK_VOLUME:
         {
@@ -140,6 +142,7 @@ glusterd_op_send_cli_response (glusterd_op_t op, int32_t op_ret,
         case GD_OP_SNAP:
         case GD_OP_BARRIER:
         case GD_OP_BITROT:
+        case GD_OP_SCRUB_STATUS:
         {
                 /*nothing specific to be done*/
                 break;
@@ -781,6 +784,15 @@ __glusterd_cluster_lock_cbk (struct rpc_req *req, struct iovec *iov,
         }
 
 out:
+
+        ret = glusterd_set_txn_opinfo (txn_id, &opinfo);
+        if (ret)
+                gf_msg (THIS->name, GF_LOG_ERROR, 0,
+                                GD_MSG_TRANS_OPINFO_SET_FAIL,
+                                "Unable to set "
+                                "transaction's opinfo");
+
+
         ret = glusterd_op_sm_inject_event (event_type, txn_id, NULL);
 
         if (!ret) {
@@ -891,6 +903,14 @@ glusterd_mgmt_v3_lock_peers_cbk_fn (struct rpc_req *req, struct iovec *iov,
         }
 
 out:
+
+        ret = glusterd_set_txn_opinfo (txn_id, &opinfo);
+        if (ret)
+                gf_msg (THIS->name, GF_LOG_ERROR, 0,
+                                GD_MSG_TRANS_OPINFO_SET_FAIL,
+                                "Unable to set "
+                                "transaction's opinfo");
+
         ret = glusterd_op_sm_inject_event (event_type, txn_id, NULL);
         if (!ret) {
                 glusterd_friend_sm ();
@@ -994,6 +1014,14 @@ glusterd_mgmt_v3_unlock_peers_cbk_fn (struct rpc_req *req, struct iovec *iov,
         }
 
 out:
+
+        ret = glusterd_set_txn_opinfo (txn_id, &opinfo);
+        if (ret)
+                gf_msg (THIS->name, GF_LOG_ERROR, 0,
+                                GD_MSG_TRANS_OPINFO_SET_FAIL,
+                                "Unable to set "
+                                "transaction's opinfo");
+
         ret = glusterd_op_sm_inject_event (event_type, txn_id, NULL);
 
         if (!ret) {
@@ -1092,6 +1120,14 @@ __glusterd_cluster_unlock_cbk (struct rpc_req *req, struct iovec *iov,
         }
 
 out:
+
+        ret = glusterd_set_txn_opinfo (txn_id, &opinfo);
+        if (ret)
+                gf_msg (THIS->name, GF_LOG_ERROR, 0,
+                                GD_MSG_TRANS_OPINFO_SET_FAIL,
+                                "Unable to set "
+                                "transaction's opinfo");
+
         ret = glusterd_op_sm_inject_event (event_type, txn_id, NULL);
 
         if (!ret) {
@@ -1126,14 +1162,17 @@ __glusterd_stage_op_cbk (struct rpc_req *req, struct iovec *iov,
         xlator_t                      *this = NULL;
         glusterd_conf_t               *priv = NULL;
         uuid_t                        *txn_id = NULL;
+        call_frame_t                  *frame = NULL;
 
         this = THIS;
         GF_ASSERT (this);
         GF_ASSERT (req);
         priv = this->private;
         GF_ASSERT (priv);
+        GF_ASSERT(myframe);
 
-        txn_id = &priv->global_txn_id;
+        frame = myframe;
+        txn_id = frame->cookie;
 
         if (-1 == req->rpc_status) {
                 rsp.op_ret   = -1;
@@ -1191,10 +1230,6 @@ out:
                         uuid_utoa (rsp.uuid));
         }
 
-        ret = dict_get_bin (dict, "transaction_id", (void **)&txn_id);
-        gf_msg_debug (this->name, 0, "transaction ID = %s",
-                uuid_utoa (*txn_id));
-
         rcu_read_lock ();
         peerinfo = glusterd_peerinfo_find (rsp.uuid, NULL);
         if (peerinfo == NULL) {
@@ -1227,6 +1262,13 @@ out:
         rcu_read_unlock ();
 
 
+        ret = glusterd_set_txn_opinfo (txn_id, &opinfo);
+        if (ret)
+                gf_msg (THIS->name, GF_LOG_ERROR, 0,
+                                GD_MSG_TRANS_OPINFO_SET_FAIL,
+                                "Unable to set "
+                                "transaction's opinfo");
+
         ret = glusterd_op_sm_inject_event (event_type, txn_id, NULL);
 
         if (!ret) {
@@ -1242,6 +1284,7 @@ out:
         } else {
                 free (rsp.dict.dict_val); //malloced by xdr
         }
+        GF_FREE (frame->cookie);
         GLUSTERD_STACK_DESTROY (((call_frame_t *)myframe));
         return ret;
 }
@@ -1270,14 +1313,17 @@ __glusterd_commit_op_cbk (struct rpc_req *req, struct iovec *iov,
         glusterd_conf_t               *priv = NULL;
         uuid_t                        *txn_id = NULL;
         glusterd_op_info_t            txn_op_info = {{0},};
+        call_frame_t                  *frame  = NULL;
 
         this = THIS;
         GF_ASSERT (this);
         GF_ASSERT (req);
         priv = this->private;
         GF_ASSERT (priv);
+        GF_ASSERT(myframe);
 
-        txn_id = &priv->global_txn_id;
+        frame = myframe;
+        txn_id = frame->cookie;
 
         if (-1 == req->rpc_status) {
                 rsp.op_ret   = -1;
@@ -1335,9 +1381,6 @@ __glusterd_commit_op_cbk (struct rpc_req *req, struct iovec *iov,
                         "Received commit ACC from uuid: %s",
                         uuid_utoa (rsp.uuid));
         }
-        ret = dict_get_bin (dict, "transaction_id", (void **)&txn_id);
-        gf_msg_debug (this->name, 0, "transaction ID = %s",
-                uuid_utoa (*txn_id));
 
         ret = glusterd_get_txn_opinfo (txn_id, &txn_op_info);
         if (ret) {
@@ -1401,6 +1444,14 @@ unlock:
         rcu_read_unlock ();
 
 out:
+
+        ret = glusterd_set_txn_opinfo (txn_id, &opinfo);
+        if (ret)
+                gf_msg (THIS->name, GF_LOG_ERROR, 0,
+                                GD_MSG_TRANS_OPINFO_SET_FAIL,
+                                "Unable to set "
+                                "transaction's opinfo");
+
         ret = glusterd_op_sm_inject_event (event_type, txn_id, NULL);
 
         if (!ret) {
@@ -1411,6 +1462,7 @@ out:
         if (dict)
                 dict_unref (dict);
         free (rsp.op_errstr); //malloced by xdr
+        GF_FREE (frame->cookie);
         GLUSTERD_STACK_DESTROY (((call_frame_t *)myframe));
         return ret;
 }
@@ -1895,9 +1947,9 @@ glusterd_stage_op (call_frame_t *frame, xlator_t *this,
         int                             ret = -1;
         glusterd_peerinfo_t             *peerinfo = NULL;
         glusterd_conf_t                 *priv = NULL;
-        call_frame_t                    *dummy_frame = NULL;
         dict_t                          *dict = NULL;
         gf_boolean_t                    is_alloc = _gf_true;
+        uuid_t                          *txn_id      = NULL;
 
         if (!this) {
                 goto out;
@@ -1927,13 +1979,34 @@ glusterd_stage_op (call_frame_t *frame, xlator_t *this,
                         "to request buffer");
                 goto out;
         }
-
-
-        dummy_frame = create_frame (this, this->ctx->pool);
-        if (!dummy_frame)
+        /* Sending valid transaction ID to peers */
+        ret = dict_get_bin (dict, "transaction_id",
+                            (void **)&txn_id);
+        if (ret) {
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        GD_MSG_TRANS_ID_GET_FAIL,
+                       "Failed to get transaction id.");
                 goto out;
+        } else {
+                gf_msg_debug (this->name, 0,
+                        "Transaction_id = %s", uuid_utoa (*txn_id));
+        }
 
-        ret = glusterd_submit_request (peerinfo->rpc, &req, dummy_frame,
+        if (!frame)
+                frame = create_frame (this, this->ctx->pool);
+
+        if (!frame) {
+                ret = -1;
+                goto out;
+        }
+        frame->cookie = GF_CALLOC (1, sizeof(uuid_t), gf_common_mt_uuid_t);
+        if (!frame->cookie) {
+                ret = -1;
+                goto out;
+        }
+        gf_uuid_copy (frame->cookie, *txn_id);
+
+        ret = glusterd_submit_request (peerinfo->rpc, &req, frame,
                                        peerinfo->mgmt, GLUSTERD_MGMT_STAGE_OP,
                                        NULL,
                                        this, glusterd_stage_op_cbk,
@@ -1958,6 +2031,7 @@ glusterd_commit_op (call_frame_t *frame, xlator_t *this,
         call_frame_t           *dummy_frame = NULL;
         dict_t                 *dict        = NULL;
         gf_boolean_t            is_alloc    = _gf_true;
+        uuid_t                 *txn_id      = NULL;
 
         if (!this) {
                 goto out;
@@ -1986,12 +2060,34 @@ glusterd_commit_op (call_frame_t *frame, xlator_t *this,
                         "request buffer");
                 goto out;
         }
-
-        dummy_frame = create_frame (this, this->ctx->pool);
-        if (!dummy_frame)
+        /* Sending valid transaction ID to peers */
+        ret = dict_get_bin (dict, "transaction_id",
+                            (void **)&txn_id);
+        if (ret) {
+                gf_msg (this->name, GF_LOG_ERROR, 0,
+                        GD_MSG_TRANS_ID_GET_FAIL,
+                       "Failed to get transaction id.");
                 goto out;
+        } else {
+                gf_msg_debug (this->name, 0,
+                        "Transaction_id = %s", uuid_utoa (*txn_id));
+        }
 
-        ret = glusterd_submit_request (peerinfo->rpc, &req, dummy_frame,
+        if (!frame)
+                frame = create_frame (this, this->ctx->pool);
+
+        if (!frame) {
+                ret = -1;
+                goto out;
+        }
+        frame->cookie = GF_CALLOC (1, sizeof(uuid_t), gf_common_mt_uuid_t);
+        if (!frame->cookie) {
+                ret = -1;
+                goto out;
+        }
+        gf_uuid_copy (frame->cookie, *txn_id);
+
+        ret = glusterd_submit_request (peerinfo->rpc, &req, frame,
                                        peerinfo->mgmt, GLUSTERD_MGMT_COMMIT_OP,
                                        NULL,
                                        this, glusterd_commit_op_cbk,
@@ -2140,6 +2236,7 @@ glusterd_brick_op (call_frame_t *frame, xlator_t *this,
 
         gd1_mgmt_brick_op_req           *req = NULL;
         int                             ret = 0;
+        int                             ret1 = 0;
         glusterd_conf_t                 *priv = NULL;
         call_frame_t                    *dummy_frame = NULL;
         char                            *op_errstr = NULL;
@@ -2187,6 +2284,7 @@ glusterd_brick_op (call_frame_t *frame, xlator_t *this,
                 if ((pending_node->type == GD_NODE_NFS) ||
                     (pending_node->type == GD_NODE_QUOTAD) ||
                     (pending_node->type == GD_NODE_SNAPD) ||
+                    (pending_node->type == GD_NODE_SCRUB) ||
                     ((pending_node->type == GD_NODE_SHD) &&
                      (req_ctx->op == GD_OP_STATUS_VOLUME)))
                         ret = glusterd_node_op_build_payload
@@ -2262,6 +2360,17 @@ glusterd_brick_op (call_frame_t *frame, xlator_t *this,
         opinfo.brick_pending_count = pending_bricks;
 
 out:
+
+        if (ret)
+                opinfo.op_ret = ret;
+
+        ret1 = glusterd_set_txn_opinfo (txn_id, &opinfo);
+        if (ret1)
+                gf_msg (THIS->name, GF_LOG_ERROR, 0,
+                                GD_MSG_TRANS_OPINFO_SET_FAIL,
+                                "Unable to set "
+                                "transaction's opinfo");
+
         if (ret) {
                 glusterd_op_sm_inject_event (GD_OP_EVENT_RCVD_RJT,
                                              txn_id, data);

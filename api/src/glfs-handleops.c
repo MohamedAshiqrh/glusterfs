@@ -63,7 +63,7 @@ glfs_iatt_from_stat (struct stat *stat, int valid, struct iatt *iatt,
 
 struct glfs_object *
 pub_glfs_h_lookupat (struct glfs *fs, struct glfs_object *parent,
-                     const char *path, struct stat *stat)
+                     const char *path, struct stat *stat, int follow)
 {
         int                      ret = 0;
         xlator_t                *subvol = NULL;
@@ -100,7 +100,7 @@ pub_glfs_h_lookupat (struct glfs *fs, struct glfs_object *parent,
 
         /* fop/op */
         ret = glfs_resolve_at (fs, subvol, inode, path, &loc, &iatt,
-                                    0 /*TODO: links? */, 0);
+                                    follow, 0);
 
         /* populate out args */
         if (!ret) {
@@ -124,7 +124,16 @@ invalid_fs:
         return object;
 }
 
-GFAPI_SYMVER_PUBLIC_DEFAULT(glfs_h_lookupat, 3.4.2);
+GFAPI_SYMVER_PUBLIC_DEFAULT(glfs_h_lookupat, 3.7.4);
+
+struct glfs_object *
+pub_glfs_h_lookupat34 (struct glfs *fs, struct glfs_object *parent,
+                       const char *path, struct stat *stat)
+{
+        return pub_glfs_h_lookupat (fs, parent, path, stat, 0);
+}
+
+GFAPI_SYMVER_PUBLIC(glfs_h_lookupat34, glfs_h_lookupat, 3.4.2);
 
 int
 pub_glfs_h_statfs (struct glfs *fs, struct glfs_object *object,
@@ -317,6 +326,16 @@ glfs_h_getxattrs_common (struct glfs *fs, struct glfs_object *object,
                 return -1;
         }
 
+        if (!name || *name == '\0') {
+                errno = EINVAL;
+                return -1;
+        }
+
+        if (strlen(name) > GF_XATTR_NAME_MAX) {
+                errno = ENAMETOOLONG;
+                return -1;
+        }
+
         /* get the active volume */
         subvol = glfs_active_subvol (fs);
         if (!subvol) {
@@ -464,6 +483,16 @@ pub_glfs_h_setxattrs (struct glfs *fs, struct glfs_object *object,
         if ((fs == NULL) || (object == NULL) ||
                  (name == NULL) || (value == NULL)) {
                 errno = EINVAL;
+                return -1;
+        }
+
+        if (!name || *name == '\0') {
+                errno = EINVAL;
+                return -1;
+        }
+
+        if (strlen(name) > GF_XATTR_NAME_MAX) {
+                errno = ENAMETOOLONG;
                 return -1;
         }
 
@@ -1259,6 +1288,10 @@ pub_glfs_h_create_from_handle (struct glfs *fs, unsigned char *handle, int len,
 
         memcpy (loc.gfid, handle, GFAPI_HANDLE_LENGTH);
 
+        /* make sure the gfid received is valid */
+        GF_VALIDATE_OR_GOTO ("glfs_h_create_from_handle",
+                             !(gf_uuid_is_null (loc.gfid)), out);
+
         newinode = inode_find (subvol->itable, loc.gfid);
         if (newinode) {
                 if (!stat) /* No need of lookup */
@@ -1929,10 +1962,10 @@ pub_glfs_h_poll_upcall (struct glfs *fs, struct callback_arg *up_arg)
                          *
                          * Applications will ignore this notification
                          * as up_arg->object will be NULL */
-                        gf_log (subvol->name, GF_LOG_WARNING,
-                                "handle creation of %s failed: %s",
-                                uuid_utoa (upcall_data->gfid),
-                                strerror (errno));
+                        gf_msg (subvol->name, GF_LOG_WARNING, errno,
+                                API_MSG_CREATE_HANDLE_FAILED,
+                                "handle creation of %s failed",
+                                uuid_utoa (upcall_data->gfid));
 
                         reason = GFAPI_CBK_EVENT_NULL;
                         break;

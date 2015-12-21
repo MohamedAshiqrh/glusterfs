@@ -31,6 +31,7 @@
 #include "glusterd-op-sm.h"
 #include "glusterd-utils.h"
 #include "glusterd-store.h"
+#include "glusterd-svc-helper.h"
 #include "glusterd-snapshot-utils.h"
 #include "glusterd-server-quorum.h"
 
@@ -596,12 +597,13 @@ out:
 /* Clean up stale volumes on the peer being detached. The volumes which have
  * bricks on other peers are stale with respect to the detached peer.
  */
-static int
+static void
 glusterd_peer_detach_cleanup (glusterd_conf_t *priv)
 {
-        int                     ret = -1;
-        glusterd_volinfo_t      *volinfo = NULL;
+        int                     ret          = -1;
+        glusterd_volinfo_t      *volinfo     = NULL;
         glusterd_volinfo_t      *tmp_volinfo = NULL;
+        glusterd_svc_t          *svc         = NULL;
 
         GF_ASSERT (priv);
 
@@ -618,19 +620,42 @@ glusterd_peer_detach_cleanup (glusterd_conf_t *priv)
                         gf_msg (THIS->name, GF_LOG_INFO, 0,
                                 GD_MSG_STALE_VOL_DELETE_INFO,
                                 "Deleting stale volume %s", volinfo->volname);
+
+                        /*Stop snapd daemon service if snapd daemon is running*/
+                        if (!volinfo->is_snap_volume) {
+                                svc = &(volinfo->snapd.svc);
+                                ret = svc->stop (svc, SIGTERM);
+                                if (ret) {
+                                        gf_msg (THIS->name, GF_LOG_ERROR, 0,
+                                                GD_MSG_SVC_STOP_FAIL, "Failed "
+                                                "to stop snapd daemon service");
+                                }
+                        }
+
+                        ret = glusterd_cleanup_snaps_for_volume (volinfo);
+                        if (ret) {
+                                gf_msg (THIS->name, GF_LOG_ERROR, 0,
+                                        GD_MSG_VOL_DELETE_FAIL,
+                                        "Error deleting snapshots for volume %s",
+                                        volinfo->volname);
+                        }
+
                         ret = glusterd_delete_volume (volinfo);
                         if (ret) {
                                 gf_msg (THIS->name, GF_LOG_ERROR, 0,
                                         GD_MSG_STALE_VOL_REMOVE_FAIL,
                                         "Error deleting stale volume");
-                                goto out;
                         }
                 }
         }
-        ret = 0;
-out:
-        gf_msg_debug (THIS->name, 0, "Returning %d", ret);
-        return ret;
+
+        /*Reconfigure all daemon services upon peer detach*/
+        ret = glusterd_svcs_reconfigure ();
+        if (ret) {
+                gf_msg (THIS->name, GF_LOG_ERROR, 0,
+                        GD_MSG_SVC_STOP_FAIL,
+                        "Failed to reconfigure all daemon services.");
+        }
 }
 
 static int
@@ -675,13 +700,7 @@ glusterd_ac_handle_friend_remove_req (glusterd_friend_sm_event_t *event,
         }
         rcu_read_unlock ();
 
-        ret = glusterd_peer_detach_cleanup (priv);
-        if (ret) {
-                gf_msg (THIS->name, GF_LOG_WARNING, 0,
-                        GD_MSG_PEER_DETACH_CLEANUP_FAIL,
-                        "Peer detach cleanup was not successful");
-                ret = 0;
-        }
+        glusterd_peer_detach_cleanup (priv);
 out:
         if (new_event)
                 GF_FREE (new_event->peername);

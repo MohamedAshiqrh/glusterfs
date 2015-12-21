@@ -893,7 +893,7 @@ out:
 }
 
 int
-cli_cmd_volume_attach_tier_cbk (struct cli_state *state,
+do_cli_cmd_volume_attach_tier (struct cli_state *state,
                                 struct cli_cmd_word *word, const char **words,
                                 int wordcount)
 {
@@ -905,20 +905,10 @@ cli_cmd_volume_attach_tier_cbk (struct cli_state *state,
         int                     parse_error = 0;
         cli_local_t             *local = NULL;
         int                     type = 0;
-        char                    *question = "Attach tier is recommended only "
-                                            "for testing purposes in this "
-                                            "release. Do you want to continue?";
-        gf_answer_t             answer = GF_ANSWER_NO;
 
         frame = create_frame (THIS, THIS->ctx->pool);
         if (!frame)
                 goto out;
-
-        answer = cli_cmd_get_confirmation (state, question);
-        if (GF_ANSWER_NO == answer) {
-                ret = 0;
-                goto out;
-        }
 
         ret = cli_cmd_volume_add_brick_parse (words, wordcount, &options, &type);
         if (ret) {
@@ -975,7 +965,7 @@ out:
 }
 
 int
-cli_cmd_volume_detach_tier_cbk (struct cli_state *state,
+do_cli_cmd_volume_detach_tier (struct cli_state *state,
                               struct cli_cmd_word *word, const char **words,
                               int wordcount)
 {
@@ -996,7 +986,8 @@ cli_cmd_volume_detach_tier_cbk (struct cli_state *state,
         if (!frame)
                 goto out;
 
-        ret = cli_cmd_volume_detach_tier_parse(words, wordcount, &options);
+        ret = cli_cmd_volume_detach_tier_parse(words, wordcount, &options,
+                                               &need_question);
         if (ret) {
                 cli_usage_out (word->pattern);
                 parse_error = 1;
@@ -1040,6 +1031,79 @@ out:
         return ret;
 }
 
+int
+cli_cmd_volume_tier_cbk (struct cli_state *state,
+                         struct cli_cmd_word *word, const char **words,
+                         int wordcount)
+{
+        int                      ret     = -1;
+        call_frame_t            *frame   = NULL;
+        dict_t                  *options = NULL;
+        char                    *volname = NULL;
+        rpc_clnt_procedure_t    *proc    = NULL;
+        cli_local_t             *local   = NULL;
+        int                      i       = 0;
+
+        if (wordcount < 4) {
+                cli_usage_out (word->pattern);
+                if (wordcount == 3 && !strcmp(words[2], "help"))
+                        ret = 0;
+                goto out;
+        }
+
+        if (!strcmp(words[1], "detach-tier")) {
+                ret = do_cli_cmd_volume_detach_tier (state, word,
+                                                     words, wordcount);
+                goto out;
+        } else if (!strcmp(words[3], "detach")) {
+                for (i = 3; i < wordcount; i++)
+                        words[i] = words[i+1];
+
+                ret = do_cli_cmd_volume_detach_tier (state, word,
+                                                     words, wordcount-1);
+                goto out;
+
+        } else if (!strcmp(words[1], "attach-tier")) {
+                ret = do_cli_cmd_volume_attach_tier (state, word,
+                                                     words, wordcount);
+                goto out;
+        } else if (!strcmp(words[3], "attach")) {
+                for (i = 3; i < wordcount; i++)
+                        words[i] = words[i+1];
+
+                ret = do_cli_cmd_volume_attach_tier (state, word,
+                                                     words, wordcount-1);
+                goto out;
+        }
+
+        ret = cli_cmd_volume_tier_parse (words, wordcount, &options);
+        if (ret) {
+                cli_usage_out (word->pattern);
+                goto out;
+        }
+
+        proc = &cli_rpc_prog->proctable[GLUSTER_CLI_TIER];
+
+        frame = create_frame (THIS, THIS->ctx->pool);
+        if (!frame)
+                goto out;
+
+        CLI_LOCAL_INIT (local, words, frame, options);
+
+        if (proc->fn) {
+                ret = proc->fn (frame, THIS, options);
+        }
+
+out:
+        if (ret) {
+                cli_out ("Tier command failed");
+        }
+        if (options)
+                dict_unref (options);
+
+        return ret;
+}
+
 static int
 gf_cli_create_auxiliary_mount (char *volname)
 {
@@ -1048,6 +1112,7 @@ gf_cli_create_auxiliary_mount (char *volname)
         char     pidfile_path[PATH_MAX]  = {0,};
         char     logfile[PATH_MAX]       = {0,};
         char     qpid [16]               = {0,};
+        char     *sockpath               = NULL;
 
         GLUSTERFS_GET_AUX_MOUNT_PIDFILE (pidfile_path, volname);
 
@@ -1059,7 +1124,7 @@ gf_cli_create_auxiliary_mount (char *volname)
         }
 
         GLUSTERD_GET_QUOTA_AUX_MOUNT_PATH (mountdir, volname, "/");
-        ret = mkdir (mountdir, 0777);
+        ret = sys_mkdir (mountdir, 0777);
         if (ret && errno != EEXIST) {
                 gf_log ("cli", GF_LOG_ERROR, "Failed to create auxiliary mount "
                         "directory %s. Reason : %s", mountdir,
@@ -1071,8 +1136,15 @@ gf_cli_create_auxiliary_mount (char *volname)
                   DEFAULT_LOG_FILE_DIRECTORY, volname);
         snprintf(qpid, 15, "%d", GF_CLIENT_PID_QUOTA_MOUNT);
 
+        if (global_state->glusterd_sock) {
+                sockpath = global_state->glusterd_sock;
+        } else {
+                sockpath = DEFAULT_GLUSTERD_SOCKFILE;
+        }
+
         ret = runcmd (SBIN_DIR"/glusterfs",
-                      "-s", "localhost",
+                      "--volfile-server", sockpath,
+                      "--volfile-server-transport", "unix",
                       "--volfile-id", volname,
                       "-l", logfile,
                       "-p", pidfile_path,
@@ -1189,9 +1261,10 @@ _limits_set_on_volume (char *volname, int type) {
         /* TODO: fix hardcoding; Need to perform an RPC call to glusterd
          * to fetch working directory
          */
-        sprintf (quota_conf_file, "%s/vols/%s/quota.conf",
-                 GLUSTERD_DEFAULT_WORKDIR,
-                 volname);
+        snprintf (quota_conf_file, sizeof quota_conf_file,
+                  "%s/vols/%s/quota.conf",
+                  GLUSTERD_DEFAULT_WORKDIR,
+                  volname);
         fd = open (quota_conf_file, O_RDONLY);
         if (fd == -1)
                 goto out;
@@ -1219,7 +1292,7 @@ _limits_set_on_volume (char *volname, int type) {
         }
 out:
         if (fd != -1)
-                close (fd);
+                sys_close (fd);
 
         return limits_set;
 }
@@ -1357,9 +1430,10 @@ cli_cmd_quota_handle_list_all (const char **words, dict_t *options)
 
         //TODO: fix hardcoding; Need to perform an RPC call to glusterd
         //to fetch working directory
-        sprintf (quota_conf_file, "%s/vols/%s/quota.conf",
-                 GLUSTERD_DEFAULT_WORKDIR,
-                 volname);
+        snprintf (quota_conf_file, sizeof quota_conf_file,
+                  "%s/vols/%s/quota.conf",
+                  GLUSTERD_DEFAULT_WORKDIR,
+                  volname);
         fd = open (quota_conf_file, O_RDONLY);
         if (fd == -1) {
                 //This may because no limits were yet set on the volume
@@ -1375,18 +1449,6 @@ cli_cmd_quota_handle_list_all (const char **words, dict_t *options)
 
         CLI_LOCAL_INIT (local, words, frame, xdata);
         proc = &cli_quotad_clnt.proctable[GF_AGGREGATOR_GETLIMIT];
-
-        if (!(global_state->mode & GLUSTER_MODE_XML)) {
-                print_quota_list_header (type);
-        } else {
-                ret = cli_xml_output_vol_quota_limit_list_begin
-                        (local, 0, 0, NULL);
-                if (ret) {
-                        gf_log ("cli", GF_LOG_ERROR, "Error in printing "
-                                "xml output");
-                        goto out;
-                }
-        }
 
         gfid_str = GF_CALLOC (1, gf_common_mt_char, 64);
         if (!gfid_str) {
@@ -1452,7 +1514,7 @@ out:
         }
 
         if (fd != -1) {
-                close (fd);
+                sys_close (fd);
         }
 
         GF_FREE (gfid_str);
@@ -2356,7 +2418,7 @@ cli_cmd_volume_statedump_cbk (struct cli_state *state, struct cli_cmd_word *word
 out:
         if (ret) {
                 cli_cmd_sent_status_get (&sent);
-                if ((sent == 0) && (parse_error = 0))
+                if ((sent == 0) && (parse_error == 0))
                         cli_out ("Volume statedump failed");
         }
 
@@ -2596,14 +2658,24 @@ struct cli_cmd volume_cmds[] = {
           cli_cmd_volume_rename_cbk,
           "rename volume <VOLNAME> to <NEW-VOLNAME>"},*/
 
+        { "volume tier <VOLNAME> status\n"
+        "volume tier <VOLNAME> attach [<replica COUNT>] <NEW-BRICK>...\n"
+        "volume tier <VOLNAME> detach <start|stop|status|commit|[force]>\n",
+        cli_cmd_volume_tier_cbk,
+        "Tier translator specific operations."},
+
         { "volume attach-tier <VOLNAME> [<replica COUNT>] <NEW-BRICK>...",
-          cli_cmd_volume_attach_tier_cbk,
-          "attach tier to volume <VOLNAME>"},
+        cli_cmd_volume_tier_cbk,
+          "NOTE: this is old syntax, will be depreciated in next release. "
+          "Please use gluster volume tier <vol> attach "
+          "[<replica COUNT>] <NEW-BRICK>..."},
 
         { "volume detach-tier <VOLNAME> "
-          " <start|stop|status|commit|[force]>",
-          cli_cmd_volume_detach_tier_cbk,
-          "detach tier from volume <VOLNAME>"},
+          " <start|stop|status|commit|force>",
+        cli_cmd_volume_tier_cbk,
+          "NOTE: this is old syntax, will be depreciated in next release. "
+          "Please use gluster volume tier <vol> detach "
+          "{start|stop|commit} [force]"},
 
         { "volume add-brick <VOLNAME> [<stripe|replica> <COUNT>] <NEW-BRICK> ... [force]",
           cli_cmd_volume_add_brick_cbk,
@@ -2653,7 +2725,7 @@ struct cli_cmd volume_cmds[] = {
          "reset all the reconfigured options"},
 
 #if (SYNCDAEMON_COMPILE)
-        {"volume "GEOREP" [<VOLNAME>] [<SLAVE-URL>] {create [[no-verify]|[push-pem]] [force]"
+        {"volume "GEOREP" [<VOLNAME>] [<SLAVE-URL>] {create [[ssh-port n] [[no-verify]|[push-pem]]] [force]"
          "|start [force]|stop [force]|pause [force]|resume [force]|config|status [detail]|delete} [options...]",
          cli_cmd_volume_gsync_set_cbk,
          "Geo-sync operations",
@@ -2721,7 +2793,7 @@ struct cli_cmd volume_cmds[] = {
          "volume bitrot <volname> scrub-throttle {lazy|normal|aggressive} |\n"
          "volume bitrot <volname> scrub-frequency {hourly|daily|weekly|biweekly"
          "|monthly} |\n"
-         "volume bitrot <volname> scrub {pause|resume}",
+         "volume bitrot <volname> scrub {pause|resume|status}",
          cli_cmd_bitrot_cbk,
          "Bitrot translator specific operation. For more information about "
          "bitrot command type  'man gluster'"
@@ -2733,12 +2805,20 @@ int
 cli_cmd_volume_help_cbk (struct cli_state *state, struct cli_cmd_word *in_word,
                       const char **words, int wordcount)
 {
-        struct cli_cmd        *cmd = NULL;
+        struct cli_cmd        *cmd     = NULL;
+        struct cli_cmd        *vol_cmd = NULL;
+        int                   count    = 0;
 
-        for (cmd = volume_cmds; cmd->pattern; cmd++)
-                if (_gf_false == cmd->disable)
-                        cli_out ("%s - %s", cmd->pattern, cmd->desc);
+        cmd = GF_CALLOC (1, sizeof (volume_cmds), cli_mt_cli_cmd);
+        memcpy (cmd, volume_cmds, sizeof (volume_cmds));
+        count = (sizeof (volume_cmds) / sizeof (struct cli_cmd));
+        cli_cmd_sort (cmd, count);
 
+        for (vol_cmd = cmd; vol_cmd->pattern; vol_cmd++)
+                if (_gf_false == vol_cmd->disable)
+                        cli_out ("%s - %s", vol_cmd->pattern, vol_cmd->desc);
+
+        GF_FREE (cmd);
         return 0;
 }
 

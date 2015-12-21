@@ -177,6 +177,10 @@ start_glusterfs ()
         cmd_line=$(echo "$cmd_line --aux-gfid-mount");
     fi
 
+    if [ -n "$resolve_gids" ]; then
+        cmd_line=$(echo "$cmd_line --resolve-gids");
+    fi
+
     if [ -n "$no_root_squash" ]; then
         cmd_line=$(echo "$cmd_line --no-root-squash");
     fi
@@ -463,6 +467,11 @@ with_options()
                 [ $value = "false" ] ; then
                 no_root_squash=1;
             fi ;;
+        "context"|"fscontext"|"defcontext"|"rootcontext")
+            # standard SElinux mount options to pass to the kernel
+            [ -z "$fuse_mountopts" ] || fuse_mountopts="$fuse_mountopts,"
+            fuse_mountopts="${fuse_mountopts}$key=\"$value\""
+            ;;
         *)
             warn "Invalid option: $key"
             exit 1
@@ -500,6 +509,9 @@ without_options()
             if [ ${uname_s} = "Linux" ]; then
                 aux_gfid_mount=1
             fi
+            ;;
+        "resolve-gids")
+            resolve_gids=1
             ;;
          # "mount -t glusterfs" sends this, but it's useless.
         "rw")

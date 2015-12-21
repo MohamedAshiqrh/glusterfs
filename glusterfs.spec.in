@@ -89,14 +89,15 @@
 %global _with_systemd true
 %endif
 
+%if ( 0%{?fedora} ) || ( 0%{?rhel} && 0%{?rhel} >= 7 )
+%global _with_firewalld --enable-firewalld
+%endif
+
 %if 0%{?_tmpfilesdir:1}
 %define _with_tmpfilesdir --with-tmpfilesdir=%{_tmpfilesdir}
 %else
 %define _with_tmpfilesdir --without-tmpfilesdir
 %endif
-
-# there is no systemtap support! Perhaps some day there will be
-%global _without_systemtap --enable-systemtap=no
 
 # From https://fedoraproject.org/wiki/Packaging:Python#Macros
 %if ( 0%{?rhel} && 0%{?rhel} <= 5 )
@@ -216,9 +217,6 @@ BuildRequires:    libcmocka-devel >= 1.0.1
 %if ( 0%{!?_without_tiering:1} )
 BuildRequires:    sqlite-devel
 %endif
-%if ( 0%{!?_without_systemtap:1} )
-BuildRequires:    systemtap-sdt-devel
-%endif
 %if ( 0%{!?_without_bd:1} )
 BuildRequires:    lvm2-devel
 %endif
@@ -227,6 +225,10 @@ BuildRequires:    glib2-devel
 %endif
 %if ( 0%{!?_without_georeplication:1} )
 BuildRequires:    libattr-devel
+%endif
+
+%if (0%{?_with_firewalld:1})
+BuildRequires:    firewalld
 %endif
 
 Obsoletes:        hekafs
@@ -587,6 +589,11 @@ This package provides the translators needed on any GlusterFS client.
 %setup -q -n %{name}-%{version}%{?prereltag}
 
 %build
+%if ( 0%{?rhel} && 0%{?rhel} < 6 )
+CFLAGS=-DUSE_INSECURE_OPENSSL
+export CFLAGS
+%endif
+
 ./autogen.sh && %configure \
         %{?_with_cmocka} \
         %{?_with_debug} \
@@ -595,11 +602,11 @@ This package provides the translators needed on any GlusterFS client.
         %{?_without_epoll} \
         %{?_without_fusermount} \
         %{?_without_georeplication} \
+        %{?_with_firewalld} \
         %{?_without_ocf} \
         %{?_without_qemu_block} \
         %{?_without_rdma} \
         %{?_without_syslog} \
-        %{?_without_systemtap} \
         %{?_without_tiering}
 
 # fix hardening and remove rpath in shlibs
@@ -627,20 +634,8 @@ pushd xlators/features/glupy/src
 python setup.py install --skip-build --verbose --root %{buildroot}
 popd
 # Install include directory
-mkdir -p %{buildroot}%{_includedir}/glusterfs
-install -p -m 0644 libglusterfs/src/*.h \
-    %{buildroot}%{_includedir}/glusterfs/
 install -p -m 0644 contrib/uuid/*.h \
     %{buildroot}%{_includedir}/glusterfs/
-# Following needed by hekafs multi-tenant translator
-mkdir -p %{buildroot}%{_includedir}/glusterfs/rpc
-install -p -m 0644 rpc/rpc-lib/src/*.h \
-    %{buildroot}%{_includedir}/glusterfs/rpc/
-install -p -m 0644 rpc/xdr/src/*.h \
-    %{buildroot}%{_includedir}/glusterfs/rpc/
-mkdir -p %{buildroot}%{_includedir}/glusterfs/server
-install -p -m 0644 xlators/protocol/server/src/*.h \
-    %{buildroot}%{_includedir}/glusterfs/server/
 %if ( 0%{_for_fedora_koji_builds} )
 install -D -p -m 0644 %{SOURCE1} \
     %{buildroot}%{_sysconfdir}/sysconfig/glusterd
@@ -875,6 +870,15 @@ if [ -e /etc/ld.so.conf.d/glusterfs.conf ]; then
     rm -f /etc/ld.so.conf.d/glusterfs.conf
     /sbin/ldconfig
 fi
+
+%if (0%{?_with_firewalld:1})
+#reload service files if firewalld running
+if $(systemctl is-active firewalld 1>/dev/null 2>&1); then
+  #firewalld-filesystem is not available for rhel7, so command used for reload.
+  firewall-cmd  --reload
+fi
+%endif
+
 pidof -c -o %PPID -x glusterd &> /dev/null
 if [ $? -eq 0 ]; then
     kill -9 `pgrep -f gsyncd.py` &> /dev/null
@@ -931,6 +935,15 @@ fi
 
 %postun api
 /sbin/ldconfig
+
+%postun server
+%if (0%{?_with_firewalld:1})
+#reload service files if firewalld running
+if $(systemctl is-active firewalld 1>/dev/null 2>&1); then
+    firewall-cmd  --reload
+fi
+%endif
+
 
 %postun libs
 /sbin/ldconfig
@@ -1007,8 +1020,8 @@ fi
 %{_sysconfdir}/bash_completion.d/gluster
 
 %files devel
-%{_includedir}/glusterfs
-%exclude %{_includedir}/glusterfs/y.tab.h
+%dir %{_includedir}/glusterfs
+%{_includedir}/glusterfs/*
 %exclude %{_includedir}/glusterfs/api
 %exclude %{_libdir}/libgfapi.so
 %{_libdir}/*.so
@@ -1089,9 +1102,9 @@ fi
 %{_datadir}/glusterfs/scripts/generate-gfid-file.sh
 %{_datadir}/glusterfs/scripts/gsync-sync-gfid
 %ghost %attr(0644,-,-) %{_sharedstatedir}/glusterd/geo-replication/gsyncd_template.conf
-%endif
 %{_libexecdir}/glusterfs/gfind_missing_files
 %{_sbindir}/gfind_missing_files
+%endif
 
 %files libs
 %{_libdir}/*.so.*
@@ -1197,6 +1210,8 @@ fi
 %dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/hooks/1/start/post
 %dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/hooks/1/stop
 %dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/hooks/1/stop/pre
+%dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/hooks/1/delete
+%dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/hooks/1/delete/post
 
 %ghost %attr(0644,-,-) %config(noreplace) %{_sharedstatedir}/glusterd/glusterd.info
 %ghost %attr(0600,-,-) %{_sharedstatedir}/glusterd/options
@@ -1212,8 +1227,6 @@ fi
 %ghost %dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/hooks/1/create
 %ghost %dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/hooks/1/create/post
 %ghost %dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/hooks/1/create/pre
-%ghost %dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/hooks/1/delete
-%ghost %dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/hooks/1/delete/post
 %ghost %dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/hooks/1/delete/pre
 %ghost %dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/glustershd
 %ghost %dir %attr(0755,-,-) %{_sharedstatedir}/glusterd/vols
@@ -1231,11 +1244,22 @@ fi
 %{_bindir}/glusterfind
 %{_libexecdir}/glusterfs/peer_add_secret_pub
 %{_sharedstatedir}/glusterd/hooks/1/delete/post/S57glusterfind-delete-post.py
-%exclude %{_sharedstatedir}/glusterd/hooks/1/delete/post/S57glusterfind-delete-post.pyc
-%exclude %{_sharedstatedir}/glusterd/hooks/1/delete/post/S57glusterfind-delete-post.pyo
+
+%if ( 0%{?_with_firewalld:1} )
+/usr/lib/firewalld/services/glusterfs.xml
+%endif
 
 
 %changelog
+* Tue Sep 1 2015 Kaleb S. KEITHLEY <kkeithle@redhat.com>
+- erroneous ghost of ../hooks/1/delete causes install failure (#1258975)
+
+* Tue Aug 25 2015 Anand Nekkunti <anekkunt@redhat.com>
+- adding glusterfs-firewalld service (#1253967)
+
+* Tue Aug 18 2015 Niels de Vos <ndevos@redhat.com>
+- Include missing directories for glusterfind hooks scripts (#1225465)
+
 * Mon Jun 15 2015 Niels de Vos <ndevos@redhat.com>
 - Replace hook script S31ganesha-set.sh by S31ganesha-start.sh (#1231738)
 

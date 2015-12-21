@@ -104,7 +104,7 @@ typedef struct clnt_conf {
         uint16_t               lk_version; /* this variable is used to distinguish
                                               client-server transaction while
                                               performing lock healing */
-        struct timespec        grace_ts;
+        uint32_t               grace_timeout;
         gf_timer_t            *grace_timer;
         gf_boolean_t           grace_timer_needed; /* The state of this flag will
                                                       be used to decide whether
@@ -270,4 +270,6 @@ gf_boolean_t
 __is_fd_reopen_in_progress (clnt_fd_ctx_t *fdctx);
 int
 client_notify_dispatch (xlator_t *this, int32_t event, void *data, ...);
+int
+client_notify_dispatch_uniq (xlator_t *this, int32_t event, void *data, ...);
 #endif /* !_CLIENT_H */

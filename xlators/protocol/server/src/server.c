@@ -102,7 +102,8 @@ gfs_serialize_reply (rpcsvc_request_t *req, void *arg, struct iovec *outmsg,
                 xdr_size = xdr_sizeof (xdrproc, arg);
                 iob = iobuf_get2 (req->svc->ctx->iobuf_pool, xdr_size);
                 if (!iob) {
-                        gf_log_callingfn (THIS->name, GF_LOG_ERROR,
+                        gf_msg_callingfn (THIS->name, GF_LOG_ERROR, ENOMEM,
+                                          PS_MSG_NO_MEMORY,
                                           "Failed to get iobuf");
                         goto ret;
                 };
@@ -120,7 +121,9 @@ gfs_serialize_reply (rpcsvc_request_t *req, void *arg, struct iovec *outmsg,
                         /* Failed to Encode 'GlusterFS' msg in RPC is not exactly
                            failure of RPC return values.. client should get
                            notified about this, so there are no missing frames */
-                        gf_log_callingfn ("", GF_LOG_ERROR, "Failed to encode message");
+                        gf_msg_callingfn ("", GF_LOG_ERROR, 0,
+                                          PS_MSG_ENCODE_MSG_FAILED,
+                                          "Failed to encode message");
                         req->rpc_err = GARBAGE_ARGS;
                         retlen = 0;
                 }
@@ -192,12 +195,15 @@ server_submit_reply (call_frame_t *frame, rpcsvc_request_t *req, void *arg,
          */
         iobuf_unref (iob);
         if (ret == -1) {
-                gf_log_callingfn ("", GF_LOG_ERROR, "Reply submission failed");
+                gf_msg_callingfn ("", GF_LOG_ERROR, 0,
+                                  PS_MSG_REPLY_SUBMIT_FAILED,
+                                  "Reply submission failed");
                 if (frame && client && !lk_heal) {
                         server_connection_cleanup (frame->this, client,
                                                   INTERNAL_LOCKS | POSIX_LOCKS);
                 } else {
-                        gf_log_callingfn ("", GF_LOG_ERROR,
+                        gf_msg_callingfn ("", GF_LOG_ERROR, 0,
+                                          PS_MSG_REPLY_SUBMIT_FAILED,
                                           "Reply submission failed");
                         /* TODO: Failure of open(dir), create, inodelk, entrylk
                            or lk fops send failure must be handled specially. */
@@ -481,9 +487,11 @@ server_rpc_notify (rpcsvc_t *rpc, void *xl, rpcsvc_event_t event,
         server_conf_t       *conf       = NULL;
         client_t            *client     = NULL;
         server_ctx_t        *serv_ctx   = NULL;
+        struct timespec     grace_ts    = {0, };
 
         if (!xl || !data) {
-                gf_log_callingfn ("server", GF_LOG_WARNING,
+                gf_msg_callingfn ("server", GF_LOG_WARNING, 0,
+                                  PS_MSG_RPC_NOTIFY_ERROR,
                                   "Calling rpc_notify without initializing");
                 goto out;
         }
@@ -562,6 +570,9 @@ server_rpc_notify (rpcsvc_t *rpc, void *xl, rpcsvc_event_t event,
                         goto out;
                 }
 
+                grace_ts.tv_sec = conf->grace_timeout;
+                grace_ts.tv_nsec = 0;
+
                 LOCK (&serv_ctx->fdtable_lock);
                 {
                         if (!serv_ctx->grace_timer) {
@@ -573,7 +584,7 @@ server_rpc_notify (rpcsvc_t *rpc, void *xl, rpcsvc_event_t event,
 
                                 serv_ctx->grace_timer =
                                         gf_timer_call_after (this->ctx,
-                                                             conf->grace_ts,
+                                                             grace_ts,
                                                              grace_time_handler,
                                                              client);
                         }
@@ -658,36 +669,22 @@ int
 server_init_grace_timer (xlator_t *this, dict_t *options,
                          server_conf_t *conf)
 {
-        char      timestr[64]    = {0,};
         int32_t   ret            = -1;
-        int32_t   grace_timeout  = -1;
-        char     *lk_heal        = NULL;
 
         GF_VALIDATE_OR_GOTO ("server", this, out);
         GF_VALIDATE_OR_GOTO (this->name, options, out);
         GF_VALIDATE_OR_GOTO (this->name, conf, out);
 
-        conf->lk_heal = _gf_false;
-
-        ret = dict_get_str (options, "lk-heal", &lk_heal);
-        if (!ret)
-                gf_string2boolean (lk_heal, &conf->lk_heal);
+        GF_OPTION_RECONF ("lk-heal", conf->lk_heal, options, bool, out);
 
         gf_msg_debug (this->name, 0, "lk-heal = %s",
                       (conf->lk_heal) ? "on" : "off");
 
-        ret = dict_get_int32 (options, "grace-timeout", &grace_timeout);
-        if (!ret)
-                conf->grace_ts.tv_sec = grace_timeout;
-        else
-                conf->grace_ts.tv_sec = 10;
+        GF_OPTION_RECONF ("grace-timeout", conf->grace_timeout,
+                                                options, uint32, out);
 
-        gf_time_fmt (timestr, sizeof timestr, conf->grace_ts.tv_sec,
-                     gf_timefmt_s);
-        gf_msg_debug (this->name, 0, "Server grace timeout value = %s",
-                      timestr);
-
-        conf->grace_ts.tv_nsec  = 0;
+        gf_msg_debug (this->name, 0, "Server grace timeout value = %d",
+                                conf->grace_timeout);
 
         ret = 0;
 out:
@@ -713,6 +710,7 @@ reconfigure (xlator_t *this, dict_t *options)
         server_conf_t            *conf =NULL;
         rpcsvc_t                 *rpc_conf;
         rpcsvc_listener_t        *listeners;
+        rpc_transport_t          *xprt = NULL;
         int                       inode_lru_limit;
         gf_boolean_t              trace;
         data_t                   *data;
@@ -724,7 +722,8 @@ reconfigure (xlator_t *this, dict_t *options)
         conf = this->private;
 
         if (!conf) {
-                gf_log_callingfn (this->name, GF_LOG_DEBUG, "conf == null!!!");
+                gf_msg_callingfn (this->name, GF_LOG_DEBUG, EINVAL,
+                                  PS_MSG_INVALID_ENTRY, "conf == null!!!");
                 goto out;
         }
 
@@ -780,6 +779,7 @@ reconfigure (xlator_t *this, dict_t *options)
                 /* logging already done in validate_auth_options function. */
                 goto out;
         }
+
         dict_foreach (this->options, _delete_auth_opt, this->options);
         dict_foreach (options, _copy_auth_opt, this->options);
 
@@ -807,8 +807,41 @@ reconfigure (xlator_t *this, dict_t *options)
                 goto out;
         }
 
-        (void) rpcsvc_set_allow_insecure (rpc_conf, options);
-        (void) rpcsvc_set_root_squash (rpc_conf, options);
+        ret = rpcsvc_auth_reconf (rpc_conf, options);
+        if (ret == -1) {
+                gf_log (GF_RPCSVC, GF_LOG_ERROR,
+                                "Failed to reconfigure authentication");
+                goto out;
+        }
+
+        GF_OPTION_RECONF ("dynamic-auth", conf->dync_auth, options,
+                        bool, out);
+
+        if (conf->dync_auth) {
+                pthread_mutex_lock (&conf->mutex);
+                {
+                        list_for_each_entry (xprt, &conf->xprt_list, list) {
+                                /* check for client authorization */
+                                ret = gf_authenticate (xprt->clnt_options,
+                                                options, conf->auth_modules);
+                                if (ret == AUTH_ACCEPT) {
+                                        gf_msg (this->name, GF_LOG_TRACE, 0,
+                                               PS_MSG_CLIENT_ACCEPTED,
+                                               "authorized client, hence we "
+                                               "continue with this connection");
+                                } else {
+                                        gf_msg (this->name, GF_LOG_INFO,
+                                                EACCES,
+                                                PS_MSG_AUTHENTICATE_ERROR,
+                                                "unauthorized client, hence "
+                                                "terminating the connection %s",
+                                                xprt->peerinfo.identifier);
+                                        rpc_transport_disconnect(xprt);
+                                }
+                        }
+                }
+                pthread_mutex_unlock (&conf->mutex);
+        }
 
         ret = rpcsvc_set_outstanding_rpc_limit (rpc_conf, options,
                                          RPCSVC_DEFAULT_OUTSTANDING_RPC_LIMIT);
@@ -959,6 +992,12 @@ init (xlator_t *this)
                         "Failed to initialize group cache.");
                 goto out;
         }
+        ret = dict_get_str_boolean (this->options, "dynamic-auth",
+                        _gf_true);
+        if (ret == -1)
+                conf->dync_auth = _gf_true;
+        else
+                conf->dync_auth = ret;
 
         /* RPC related */
         conf->rpc = rpcsvc_init (this, this->ctx, this->options, 0);
@@ -1153,7 +1192,8 @@ server_process_event_upcall (xlator_t *this, void *data)
                 xdrproc = (xdrproc_t)xdr_gfs3_cbk_cache_invalidation_req;
                 break;
         default:
-                gf_log (this->name, GF_LOG_WARNING,
+                gf_msg (this->name, GF_LOG_WARNING, EINVAL,
+                        PS_MSG_INVALID_ENTRY,
                         "Received invalid upcall event(%d)",
                         upcall_data->event_type);
                 goto out;
@@ -1206,7 +1246,8 @@ notify (xlator_t *this, int32_t event, void *data, ...)
 
                 ret = server_process_event_upcall (this, data);
                 if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
+                        gf_msg (this->name, GF_LOG_ERROR, 0,
+                                PS_MSG_SERVER_EVENT_UPCALL_FAILED,
                                 "server_process_event_upcall failed");
                         goto out;
                 }
@@ -1273,10 +1314,10 @@ struct volume_options options[] = {
         { .key   = {"inode-lru-limit"},
           .type  = GF_OPTION_TYPE_INT,
           .min   = 0,
-          .max   = (1 * GF_UNIT_MB),
+          .max   = 1048576,
           .default_value = "16384",
-          .description = "Specifies the maximum megabytes of memory to be "
-          "used in the inode cache."
+          .description = "Specifies the limit on the number of inodes "
+          "in the lru list of the inode cache."
         },
         { .key   = {"verify-volfile-checksum"},
           .type  = GF_OPTION_TYPE_BOOL
@@ -1329,6 +1370,7 @@ struct volume_options options[] = {
          .type = GF_OPTION_TYPE_INT,
          .min  = 10,
          .max  = 1800,
+         .default_value = "10",
         },
         {.key  = {"tcp-window-size"},
          .type = GF_OPTION_TYPE_SIZET,
@@ -1363,7 +1405,6 @@ struct volume_options options[] = {
                          "requests from a client. 0 means no limit (can "
                          "potentially run out of memory)"
         },
-
         { .key   = {"manage-gids"},
           .type  = GF_OPTION_TYPE_BOOL,
           .default_value = "off",
@@ -1384,6 +1425,13 @@ struct volume_options options[] = {
                          " responses faster, depending on available processing"
                          " power. Range 1-32 threads."
         },
-
+        { .key   = {"dynamic-auth"},
+          .type  = GF_OPTION_TYPE_BOOL,
+          .default_value = "on",
+          .description   = "When 'on' perform dynamic authentication of volume "
+                           "options in order to allow/terminate client "
+                           "transport connection immediately in response to "
+                           "*.allow | *.reject volume set options."
+        },
         { .key   = {NULL} },
 };

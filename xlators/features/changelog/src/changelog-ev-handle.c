@@ -42,7 +42,7 @@ changelog_event_dispatch_cbk (struct rpc_req *req,
 }
 
 /* dispatcher RPC */
-inline int
+int
 changelog_dispatch_vec (call_frame_t *frame, xlator_t *this,
                         struct rpc_clnt *rpc, struct ev_rpc_vec *vec)
 {
@@ -199,8 +199,10 @@ changelog_ev_connector (void *data)
                                                            crpc->sock,
                                                            changelog_rpc_notify);
                         if (!crpc->rpc) {
-                                gf_log (this->name, GF_LOG_ERROR, "failed to "
-                                        "connect back.. <%s>", crpc->sock);
+                                gf_msg (this->name, GF_LOG_ERROR, 0,
+                                        CHANGELOG_MSG_RPC_CONNECT_ERROR,
+                                        "failed to connect back.. <%s>",
+                                        crpc->sock);
                                 crpc->cleanup (crpc);
                                 goto mutex_unlock;
                         }
@@ -241,7 +243,7 @@ changelog_ev_cleanup_connections (xlator_t *this, changelog_clnt_t *c_clnt)
  * a performance bottleneck.
  */
 
-static inline changelog_rpc_clnt_t *
+static changelog_rpc_clnt_t *
 get_client (changelog_clnt_t *c_clnt, struct list_head **next)
 {
         changelog_rpc_clnt_t *crpc = NULL;
@@ -260,7 +262,7 @@ get_client (changelog_clnt_t *c_clnt, struct list_head **next)
         return crpc;
 }
 
-static inline void
+static void
 put_client (changelog_clnt_t *c_clnt, changelog_rpc_clnt_t *crpc)
 {
         LOCK (&c_clnt->active_lock);
@@ -338,7 +340,8 @@ changelog_ev_dispatch (void *data)
                                        &opaque, sequencer, c_clnt);
                 if (ret != RBUF_CONSUMABLE) {
                         if (ret != RBUF_EMPTY)
-                                gf_log (this->name, GF_LOG_WARNING,
+                                gf_msg (this->name, GF_LOG_WARNING, 0,
+                                        CHANGELOG_MSG_BUFFER_STARVATION_ERROR,
                                         "Failed to get buffer for RPC dispatch "
                                         "[rbuf retval: %d]", ret);
                         continue;
@@ -347,7 +350,8 @@ changelog_ev_dispatch (void *data)
                 ret = rbuf_wait_for_completion (c_clnt->rbuf,
                                                 opaque, _dispatcher, c_clnt);
                 if (ret)
-                        gf_log (this->name, GF_LOG_WARNING,
+                        gf_msg (this->name, GF_LOG_WARNING, 0,
+                                CHANGELOG_MSG_PUT_BUFFER_FAILED,
                                 "failed to put buffer after consumption");
         }
 

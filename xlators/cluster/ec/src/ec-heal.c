@@ -292,8 +292,8 @@ void ec_fheal(call_frame_t * frame, xlator_t * this, uintptr_t target,
 
     if (ctx != NULL)
     {
-        gf_msg_trace ("ec", 0, "FHEAL ctx: flags=%X, open=%lX, bad=%lX",
-               ctx->flags, ctx->open, ctx->bad);
+        gf_msg_trace ("ec", 0, "FHEAL ctx: flags=%X, open=%lX", ctx->flags,
+                      ctx->open);
         ec_heal(frame, this, target, minimum, func, data, &ctx->loc, partial,
                 xdata);
     }
@@ -450,13 +450,13 @@ out:
         loc_wipe (&loc);
         return op_ret;
 }
-
 int
 ec_heal_metadata_find_direction (ec_t *ec, default_args_cbk_t *replies,
                                  uint64_t *versions, uint64_t *dirty,
                             unsigned char *sources, unsigned char *healed_sinks)
 {
         uint64_t xattr[EC_VERSION_SIZE] = {0};
+        uint64_t max_version    = 0;
         int      same_count     = 0;
         int      max_same_count = 0;
         int      same_source    = -1;
@@ -527,10 +527,17 @@ ec_heal_metadata_find_direction (ec_t *ec, default_args_cbk_t *replies,
                 else if (replies[i].valid && replies[i].op_ret >= 0)
                         healed_sinks[i] = 1;
         }
+        for (i = 0; i < ec->nodes; i++) {
+                if (sources[i] && (versions[i] > max_version)) {
+                         same_source = i;
+                         max_version = versions[i];
+                }
+        }
         ret = same_source;
 out:
         return ret;
 }
+
 
 int
 __ec_heal_metadata_prepare (call_frame_t *frame, ec_t *ec, inode_t *inode,
@@ -545,7 +552,6 @@ __ec_heal_metadata_prepare (call_frame_t *frame, ec_t *ec, inode_t *inode,
         int                source     = 0;
         default_args_cbk_t *greplies  = NULL;
         int                i          = 0;
-
         EC_REPLIES_ALLOC (greplies, ec->nodes);
 
         loc.inode = inode_ref (inode);
@@ -814,6 +820,51 @@ out:
         cluster_replies_wipe (replies, ec->nodes);
         return ret;
 }
+int32_t
+ec_set_new_entry_dirty (ec_t *ec, loc_t *loc, struct iatt *ia,
+                        call_frame_t *frame, xlator_t *this, unsigned char *on)
+{
+        dict_t              *xattr = NULL;
+        int32_t             ret    = -1;
+        default_args_cbk_t  *replies = NULL;
+        unsigned char       *output  = NULL;
+        uint64_t            dirty[EC_VERSION_SIZE] = {1, 1};
+        loc_t               newloc = {0};
+
+        /*Symlinks don't have any data to be healed*/
+        if (ia->ia_type == IA_IFLNK)
+                dirty[EC_DATA_TXN] = 0;
+
+        newloc.inode = inode_ref (loc->inode);
+        gf_uuid_copy (newloc.gfid, ia->ia_gfid);
+        EC_REPLIES_ALLOC (replies, ec->nodes);
+        output = alloca0 (ec->nodes);
+        xattr = dict_new();
+        if (!xattr) {
+                ret = -ENOMEM;
+                goto out;
+        }
+
+        ret = ec_dict_set_array (xattr, EC_XATTR_DIRTY, dirty,
+                                 EC_VERSION_SIZE);
+        if (ret)
+                goto out;
+
+        ret = cluster_xattrop (ec->xl_list, on, ec->nodes, replies, output,
+                               frame, ec->xl, &newloc,
+                               GF_XATTROP_ADD_ARRAY64, xattr, NULL);
+
+        if (ret < ec->fragments) {
+                ret = -ENOTCONN;
+                goto out;
+        }
+out:
+        if (xattr)
+                dict_unref (xattr);
+        cluster_replies_wipe (replies, ec->nodes);
+        loc_wipe (&newloc);
+        return ret;
+}
 
 /*Name heal*/
 int
@@ -960,6 +1011,7 @@ ec_create_name (call_frame_t *frame, ec_t *ec, inode_t *parent, char *name,
         struct iatt         *ia       = NULL;
         unsigned char       *output   = 0;
         unsigned char       *output1  = 0;
+        unsigned char       *on       = NULL;
         default_args_cbk_t  *replies  = NULL;
         loc_t               loc       = {0};
         loc_t               srcloc    = {0};
@@ -1005,10 +1057,20 @@ ec_create_name (call_frame_t *frame, ec_t *ec, inode_t *parent, char *name,
         loc.name = name;
         link = alloca0 (ec->nodes);
         create = alloca0 (ec->nodes);
+        on = alloca0 (ec->nodes);
         output = alloca0 (ec->nodes);
         output1 = alloca0 (ec->nodes);
+
+        for (i = 0; i < ec->nodes; i++) {
+                if (!lookup_replies[i].valid)
+                        continue;
+                if (lookup_replies[i].op_ret)
+                        continue;
+                on[i] = 1;
+        }
         switch (ia->ia_type) {
         case IA_IFDIR:
+                ec_set_new_entry_dirty (ec, &loc, ia, frame, ec->xl, on);
                 ret = cluster_mkdir (ec->xl_list, enoent, ec->nodes,
                                    replies, output, frame, ec->xl, &loc,
                                    st_mode_from_ia (ia->ia_prot,
@@ -1053,6 +1115,8 @@ ec_create_name (call_frame_t *frame, ec_t *ec, inode_t *parent, char *name,
                         }
                         linkname = alloca0 (strlen(replies[i].buf) + 1);
                         strcpy (linkname, replies[i].buf);
+                        ec_set_new_entry_dirty (ec, &loc, ia, frame,
+                                                ec->xl, on);
                         cluster_symlink (ec->xl_list, create, ec->nodes,
                                          replies, output, frame, ec->xl,
                                          linkname, &loc, 0, xdata);
@@ -1062,6 +1126,8 @@ ec_create_name (call_frame_t *frame, ec_t *ec, inode_t *parent, char *name,
                                 output[i] = 1;
                 break;
         case IA_IFREG:
+                ec_set_new_entry_dirty (ec, &loc, ia,
+                                        frame, ec->xl, on);
                 config.version = EC_CONFIG_VERSION;
                 config.algorithm = EC_CONFIG_ALGORITHM;
                 config.gf_word_size = EC_GF_BITS;
@@ -1069,9 +1135,8 @@ ec_create_name (call_frame_t *frame, ec_t *ec, inode_t *parent, char *name,
                 config.redundancy = ec->redundancy;
                 config.chunk_size = EC_METHOD_CHUNK_SIZE;
 
-                if (ec_dict_set_config(xdata, EC_XATTR_CONFIG,
-                                   &config) < 0) {
-                        ret = -EIO;
+                ret = ec_dict_set_config(xdata, EC_XATTR_CONFIG, &config);
+                if (ret != 0) {
                         goto out;
                 }
         default:
@@ -1304,7 +1369,7 @@ ec_heal_names (call_frame_t *frame, ec_t *ec, inode_t *inode,
                 if (!participants[i])
                         continue;
                 syncop_dir_scan (ec->xl_list[i], &loc,
-                                GF_CLIENT_PID_AFR_SELF_HEALD, &name_data,
+                                GF_CLIENT_PID_SELF_HEALD, &name_data,
                                 ec_name_heal_handler);
                 for (j = 0; j < ec->nodes; j++)
                         if (name_data.failed_on[j])
@@ -1598,10 +1663,6 @@ __ec_heal_data_prepare (call_frame_t *frame, ec_t *ec, fd_t *fd,
                 goto out;
         }
 
-        if (EC_COUNT(healed_sinks, ec->nodes) == 0) {
-                ret = -ENOTCONN;
-                goto out;
-        }
         ret = source;
 out:
         if (xattrs)
@@ -1725,7 +1786,7 @@ ec_manager_heal_block (ec_fop_data_t *fop, int32_t state)
     case -EC_STATE_REPORT:
         if (fop->cbks.heal) {
             fop->cbks.heal (fop->req_frame, fop, fop->xl, -1,
-                            EIO, 0, 0, 0, NULL);
+                            fop->error, 0, 0, 0, NULL);
         }
 
         return EC_STATE_END;
@@ -1745,15 +1806,14 @@ ec_heal_block (call_frame_t *frame, xlator_t *this, uintptr_t target,
 {
     ec_cbk_t callback = { .heal = func };
     ec_fop_data_t *fop = NULL;
-    int32_t error = EIO;
+    int32_t error = ENOMEM;
 
     gf_msg_trace("ec", 0, "EC(HEAL) %p", frame);
 
     VALIDATE_OR_GOTO(this, out);
     GF_VALIDATE_OR_GOTO(this->name, this->private, out);
 
-    fop = ec_fop_data_allocate (frame, this, EC_FOP_HEAL,
-                                EC_FLAG_UPDATE_LOC_INODE, target, minimum,
+    fop = ec_fop_data_allocate (frame, this, EC_FOP_HEAL, 0, target, minimum,
                                 NULL, ec_manager_heal_block, callback,
                                 heal);
     if (fop == NULL)
@@ -1765,7 +1825,7 @@ out:
     if (fop != NULL) {
         ec_manager(fop, error);
     } else {
-        func(frame, NULL, this, -1, EIO, 0, 0, 0, NULL);
+        func(frame, NULL, this, -1, error, 0, 0, 0, NULL);
     }
 }
 
@@ -1779,6 +1839,7 @@ ec_heal_block_done (call_frame_t *frame, void *cookie, xlator_t *this,
 
         fop->heal = NULL;
         heal->fop = NULL;
+        heal->error = op_ret < 0 ? op_errno : 0;
         syncbarrier_wake (heal->data);
         return 0;
 }
@@ -1789,6 +1850,9 @@ ec_sync_heal_block (call_frame_t *frame, xlator_t *this, ec_heal_t *heal)
         ec_heal_block (frame, this, heal->bad|heal->good, EC_MINIMUM_ONE,
                        ec_heal_block_done, heal);
         syncbarrier_wait (heal->data, 1);
+        if (heal->error != 0) {
+                return -heal->error;
+        }
         if (heal->bad == 0)
                 return -ENOTCONN;
         return 0;
@@ -1814,6 +1878,11 @@ ec_rebuild_data (call_frame_t *frame, ec_t *ec, fd_t *fd, uint64_t size,
         pool = ec->xl->ctx->iobuf_pool;
         heal->total_size = size;
         heal->size = iobpool_default_pagesize (pool);
+        /* We need to adjust the size to a multiple of the stripe size of the
+         * volume. Otherwise writes would need to fill gaps (head and/or tail)
+         * with existent data from the bad bricks. This could be garbage on a
+         * damaged file or it could fail if there aren't enough bricks. */
+        heal->size -= heal->size % ec->stripe_size;
         heal->bad       = ec_char_array_to_mask (healed_sinks, ec->nodes);
         heal->good      = ec_char_array_to_mask (sources, ec->nodes);
         heal->iatt.ia_type = IA_IFREG;
@@ -2108,6 +2177,13 @@ __ec_heal_data (call_frame_t *frame, ec_t *ec, fd_t *fd, unsigned char *heal_on,
                 if (ret < 0)
                         goto unlock;
 
+                if (EC_COUNT(healed_sinks, ec->nodes) == 0) {
+                        ret = __ec_fd_data_adjust_versions (frame, ec, fd,
+                                                            sources,
+                                        healed_sinks, versions, dirty, size);
+                        goto unlock;
+                }
+
                 source = ret;
                 ret = __ec_heal_mark_sinks (frame, ec, fd, versions,
                                             healed_sinks);
@@ -2120,6 +2196,9 @@ unlock:
         cluster_uninodelk (ec->xl_list, locked_on, ec->nodes, replies, output,
                            frame, ec->xl, ec->xl->name, fd->inode, 0, 0);
         if (ret < 0)
+                goto out;
+
+        if (EC_COUNT(healed_sinks, ec->nodes) == 0)
                 goto out;
 
         gf_msg_debug (ec->xl->name, 0, "%s: sources: %d, sinks: "
@@ -2246,6 +2325,8 @@ ec_heal_do (xlator_t *this, void *data, loc_t *loc, int32_t partial)
         /*Do heal as root*/
         frame->root->uid = 0;
         frame->root->gid = 0;
+        /*Mark the fops as internal*/
+        frame->root->pid = GF_CLIENT_PID_SELF_HEALD;
         participants = alloca0(ec->nodes);
         ec_mask_to_char_array (ec->xl_up, participants, ec->nodes);
         if (loc->name && strlen (loc->name)) {
@@ -2350,7 +2431,7 @@ void
 ec_heal_fail (ec_t *ec, ec_fop_data_t *fop)
 {
         if (fop->cbks.heal) {
-            fop->cbks.heal (fop->req_frame, NULL, ec->xl, -1, EIO, 0, 0,
+            fop->cbks.heal (fop->req_frame, NULL, ec->xl, -1, fop->error, 0, 0,
                             0, NULL);
         }
         if (fop)
@@ -2365,6 +2446,7 @@ ec_launch_heal (ec_t *ec, ec_fop_data_t *fop)
         ret = synctask_new (ec->xl->ctx->env, ec_synctask_heal_wrap,
                             ec_heal_done, NULL, fop);
         if (ret < 0) {
+                ec_fop_set_error(fop, ENOMEM);
                 ec_heal_fail (ec, fop);
         }
 }
@@ -2418,8 +2500,9 @@ ec_heal_throttle (xlator_t *this, ec_fop_data_t *fop)
                 if (fop)
                         ec_launch_heal (ec, fop);
         } else {
-               gf_msg_debug (this->name, 0, "Max number of heals are pending, "
-                             "background self-heal rejected");
+                gf_msg_debug (this->name, 0, "Max number of heals are "
+                              "pending, background self-heal rejected");
+                ec_fop_set_error(fop, EBUSY);
                 ec_heal_fail (ec, fop);
         }
 }
@@ -2431,6 +2514,7 @@ ec_heal (call_frame_t *frame, xlator_t *this, uintptr_t target,
 {
     ec_cbk_t callback = { .heal = func };
     ec_fop_data_t *fop = NULL;
+    int32_t err = EINVAL;
 
     gf_msg_trace ("ec", 0, "EC(HEAL) %p", frame);
 
@@ -2442,9 +2526,11 @@ ec_heal (call_frame_t *frame, xlator_t *this, uintptr_t target,
 
     if (frame && frame->local)
             goto fail;
-    fop = ec_fop_data_allocate (frame, this, EC_FOP_HEAL,
-                                EC_FLAG_UPDATE_LOC_INODE, target, minimum,
+    fop = ec_fop_data_allocate (frame, this, EC_FOP_HEAL, 0, target, minimum,
                                 NULL, NULL, callback, data);
+
+    err = ENOMEM;
+
     if (fop == NULL)
         goto fail;
 
@@ -2459,10 +2545,12 @@ ec_heal (call_frame_t *frame, xlator_t *this, uintptr_t target,
         fop->xdata = dict_ref(xdata);
 
     ec_heal_throttle (this, fop);
+
     return;
+
 fail:
     if (fop)
             ec_fop_data_release (fop);
     if (func)
-            func (frame, NULL, this, -1, EIO, 0, 0, 0, NULL);
+            func (frame, NULL, this, -1, err, 0, 0, 0, NULL);
 }

@@ -25,7 +25,7 @@ dht_free_mig_info (void *data)
         return;
 }
 
-static inline int
+static int
 dht_inode_ctx_set_mig_info (xlator_t *this, inode_t *inode,
                             xlator_t *src_subvol, xlator_t *dst_subvol)
 {
@@ -132,17 +132,6 @@ dht_frame_return (call_frame_t *frame)
         return this_call_cnt;
 }
 
-/*
- * A slightly "updated" version of the algorithm described in the commit log
- * is used here.
- *
- * The only enhancement is that:
- *
- * - The number of bits used by the backend filesystem for HUGE d_off which
- *   is described as 63, and
- * - The number of bits used by the d_off presented by the transformation
- *   upwards which is described as 64, are both made "configurable."
- */
 
 int
 dht_filter_loc_subvol_key (xlator_t *this, loc_t *loc, loc_t *new_loc,
@@ -448,12 +437,23 @@ dht_local_wipe (xlator_t *this, dht_local_t *local)
                 local->selfheal.layout = NULL;
         }
 
+        if (local->selfheal.refreshed_layout) {
+                dht_layout_unref (this, local->selfheal.refreshed_layout);
+                local->selfheal.refreshed_layout = NULL;
+        }
+
         dht_lock_array_free (local->lock.locks, local->lock.lk_count);
         GF_FREE (local->lock.locks);
 
         GF_FREE (local->newpath);
 
         GF_FREE (local->key);
+
+        if (local->rebalance.xdata)
+                dict_unref (local->rebalance.xdata);
+
+        if (local->rebalance.xattr)
+                dict_unref (local->rebalance.xattr);
 
         GF_FREE (local->rebalance.vector);
 
@@ -582,8 +582,7 @@ dht_subvol_get_hashed (xlator_t *this, loc_t *loc)
         conf = this->private;
         GF_VALIDATE_OR_GOTO (this->name, conf, out);
 
-        methods = conf->methods;
-        GF_VALIDATE_OR_GOTO (this->name, conf->methods, out);
+        methods = &(conf->methods);
 
         if (__is_root_gfid (loc->gfid)) {
                 subvol = dht_first_up_subvol (this);
@@ -886,7 +885,12 @@ dht_init_subvolumes (xlator_t *this, dht_conf_t *conf)
 }
 
 
-
+/*
+ op_ret values :
+  0 : Success.
+ -1 : Failure.
+  1 : File is being migrated but not by this DHT layer.
+*/
 
 static int
 dht_migration_complete_check_done (int op_ret, call_frame_t *frame, void *data)
@@ -896,7 +900,7 @@ dht_migration_complete_check_done (int op_ret, call_frame_t *frame, void *data)
 
         local = frame->local;
 
-        if (op_ret == -1)
+        if (op_ret != 0)
                 goto out;
 
         if (local->cached_subvol == NULL) {
@@ -907,7 +911,7 @@ dht_migration_complete_check_done (int op_ret, call_frame_t *frame, void *data)
         subvol = local->cached_subvol;
 
 out:
-        local->rebalance.target_op_fn (THIS, subvol, frame);
+        local->rebalance.target_op_fn (THIS, subvol, frame, op_ret);
 
         return 0;
 }
@@ -960,15 +964,35 @@ dht_migration_complete_check_task (void *data)
                 SYNCTASK_SETID (frame->root->uid, frame->root->gid);
         }
 
+
         /*
-         * temporary check related to tier promoting/demoting the file;
-         * the lower level DHT detects the migration (due to sticky
-         * bits) when it is the responsibility of the tier translator
-         * to complete the rebalance transaction. It will be corrected
-         * when rebalance and tier migration are fixed to work together.
+         * Each DHT xlator layer has its own name for the linkto xattr.
+         * If the file mode bits indicate the the file is being migrated but
+         * this layer's linkto xattr is not set, it means that another
+         * DHT layer is migrating the file. In this case, return 1 so
+         * the mode bits can be passed on to the higher layer for appropriate
+         * action.
          */
-        if (strcmp(this->parents->xlator->type, "cluster/tier") == 0) {
-                ret = 0;
+        if (-ret == ENODATA) {
+                /* This DHT translator is not migrating this file */
+
+                ret = inode_ctx_reset1 (inode, this, &tmp_miginfo);
+                if (tmp_miginfo) {
+
+                        /* This can be a problem if the file was
+                         * migrated by two different layers. Raise
+                         * a warning here.
+                         */
+                        gf_msg (this->name, GF_LOG_WARNING, 0,
+                                DHT_MSG_HAS_MIGINFO,
+                                "%s: Found miginfo in the inode ctx",
+                                tmp_loc.path ? tmp_loc.path :
+                                uuid_utoa (tmp_loc.gfid));
+
+                        miginfo = (void *)tmp_miginfo;
+                        GF_REF_PUT (miginfo);
+                }
+                ret = 1;
                 goto out;
         }
 
@@ -1094,7 +1118,14 @@ dht_rebalance_complete_check (xlator_t *this, call_frame_t *frame)
         return ret;
 
 }
+
 /* During 'in-progress' state, both nodes should have the file */
+/*
+ op_ret values :
+  0 : Success
+ -1 : Failure.
+  1 : File is being migrated but not by this DHT layer.
+*/
 static int
 dht_inprogress_check_done (int op_ret, call_frame_t *frame, void *data)
 {
@@ -1104,7 +1135,7 @@ dht_inprogress_check_done (int op_ret, call_frame_t *frame, void *data)
 
         local = frame->local;
 
-        if (op_ret == -1)
+        if (op_ret != 0)
                 goto out;
 
         inode = local->loc.inode ? local->loc.inode : local->fd->inode;
@@ -1120,7 +1151,7 @@ dht_inprogress_check_done (int op_ret, call_frame_t *frame, void *data)
         }
 
 out:
-        local->rebalance.target_op_fn (THIS, dst_subvol, frame);
+        local->rebalance.target_op_fn (THIS, dst_subvol, frame, op_ret);
 
         return 0;
 }
@@ -1142,6 +1173,9 @@ dht_rebalance_inprogress_task (void *data)
         inode_t      *inode    = NULL;
         fd_t         *iter_fd  = NULL;
         int           open_failed = 0;
+        uint64_t      tmp_miginfo  = 0;
+        dht_migrate_info_t *miginfo     = NULL;
+
 
         this  = THIS;
         frame = data;
@@ -1165,6 +1199,35 @@ dht_rebalance_inprogress_task (void *data)
         } else {
                 ret = syncop_fgetxattr (src_node, local->fd, &dict,
                                         conf->link_xattr_name, NULL, NULL);
+        }
+
+        /*
+         * Each DHT xlator layer has its own name for the linkto xattr.
+         * If the file mode bits indicate the the file is being migrated but
+         * this layer's linkto xattr is not present, it means that another
+         * DHT layer is migrating the file. In this case, return 1 so
+         * the mode bits can be passed on to the higher layer for appropriate
+         * action.
+         */
+
+        if (-ret == ENODATA) {
+                /* This DHT layer is not migrating this file */
+                ret = inode_ctx_reset1 (inode, this, &tmp_miginfo);
+                if (tmp_miginfo) {
+                        /* This can be a problem if the file was
+                         * migrated by two different layers. Raise
+                         * a warning here.
+                         */
+                        gf_msg (this->name, GF_LOG_WARNING, 0,
+                                DHT_MSG_HAS_MIGINFO,
+                                "%s: Found miginfo in the inode ctx",
+                                tmp_loc.path ? tmp_loc.path :
+                                uuid_utoa (tmp_loc.gfid));
+                        miginfo = (void *)tmp_miginfo;
+                        GF_REF_PUT (miginfo);
+                }
+                ret = 1;
+                goto out;
         }
 
         if (ret < 0) {
@@ -1852,4 +1915,175 @@ out:
                 dht_lock_stack_destroy (lock_frame);
 
         return -1;
+}
+inode_t*
+dht_heal_path (xlator_t *this, char *path, inode_table_t *itable)
+{
+        int             ret             = -1;
+        struct iatt     iatt            = {0, };
+        inode_t        *linked_inode    = NULL;
+        loc_t           loc             = {0, };
+        char           *bname           = NULL;
+        char           *save_ptr        = NULL;
+        uuid_t          gfid            = {0, };
+        char           *tmp_path        = NULL;
+
+
+        tmp_path = gf_strdup (path);
+        if (!tmp_path) {
+                goto out;
+        }
+
+        memset (gfid, 0, 16);
+        gfid[15] = 1;
+
+        gf_uuid_copy (loc.pargfid, gfid);
+        loc.parent = inode_ref (itable->root);
+
+        bname = strtok_r (tmp_path, "/",  &save_ptr);
+
+        /* sending a lookup on parent directory,
+         * Eg:  if  path is like /a/b/c/d/e/f/g/
+         * then we will send a lookup on a first and then b,c,d,etc
+         */
+
+        while (bname) {
+                linked_inode = NULL;
+                loc.inode = inode_grep (itable, loc.parent, bname);
+                if (loc.inode == NULL) {
+                        loc.inode = inode_new (itable);
+                        if (loc.inode == NULL) {
+                                ret = -ENOMEM;
+                                goto out;
+                        }
+                } else {
+                        /*
+                         * Inode is already populated in the inode table.
+                         * Which means we already looked up the inde and
+                         * linked with a dentry. So that we will skip
+                         * lookup on this entry, and proceed to next.
+                         */
+                        bname = strtok_r (NULL, "/",  &save_ptr);
+                        inode_unref (loc.parent);
+                        loc.parent = loc.inode;
+                        gf_uuid_copy (loc.pargfid, loc.inode->gfid);
+                        loc.inode = NULL;
+                        continue;
+                }
+
+                loc.name = bname;
+                ret = loc_path (&loc, bname);
+
+                ret = syncop_lookup (this, &loc, &iatt, NULL, NULL, NULL);
+                if (ret) {
+                        gf_msg (this->name, GF_LOG_INFO, -ret,
+                                DHT_MSG_DIR_SELFHEAL_FAILED,
+                                "Healing of path %s failed on subvolume %s for "
+                                "directory %s", path, this->name, bname);
+                        goto out;
+                }
+
+                linked_inode = inode_link (loc.inode, loc.parent, bname, &iatt);
+                if (!linked_inode)
+                        goto out;
+
+                loc_wipe (&loc);
+                gf_uuid_copy (loc.pargfid, linked_inode->gfid);
+                loc.inode = NULL;
+                loc.parent = linked_inode;
+
+                bname = strtok_r (NULL, "/",  &save_ptr);
+        }
+out:
+        inode_ref (linked_inode);
+        loc_wipe (&loc);
+        GF_FREE (tmp_path);
+
+        return linked_inode;
+}
+
+
+int
+dht_heal_full_path (void *data)
+{
+        call_frame_t            *heal_frame     = data;
+        dht_local_t             *local          = NULL;
+        loc_t                    loc            = {0, };
+        dict_t                  *dict           = NULL;
+        char                    *path           = NULL;
+        int                      ret            = -1;
+        xlator_t                *source         = NULL;
+        xlator_t                *this           = NULL;
+        inode_table_t           *itable         = NULL;
+        inode_t                 *inode          = NULL;
+        inode_t                 *tmp_inode      = NULL;
+
+        GF_VALIDATE_OR_GOTO ("DHT", heal_frame, out);
+
+        local = heal_frame->local;
+        this = heal_frame->this;
+        source = heal_frame->cookie;
+        heal_frame->cookie = NULL;
+        gf_uuid_copy (loc.gfid, local->gfid);
+
+        if (local->loc.inode)
+                loc.inode = inode_ref (local->loc.inode);
+        else
+                goto out;
+
+        itable = loc.inode->table;
+        ret = syncop_getxattr (source, &loc, &dict,
+                       GET_ANCESTRY_PATH_KEY, NULL, NULL);
+        if (ret) {
+                gf_msg (this->name, GF_LOG_INFO, -ret,
+                        DHT_MSG_DIR_SELFHEAL_FAILED,
+                        "Failed to get path from subvol %s. Aborting "
+                        "directory healing.", source->name);
+                goto out;
+        }
+
+        ret = dict_get_str (dict, GET_ANCESTRY_PATH_KEY, &path);
+        if (path) {
+                inode = dht_heal_path (this, path, itable);
+                if (inode && inode != local->inode) {
+                        /*
+                         * if inode returned by heal function is different
+                         * from what we passed, which means a racing thread
+                         * already linked a different inode for dentry.
+                         * So we will update our local->inode, so that we can
+                         * retrurn proper inode.
+                         */
+                        tmp_inode = local->inode;
+                        local->inode = inode;
+                        inode_unref (tmp_inode);
+                        tmp_inode = NULL;
+                } else {
+                        inode_unref (inode);
+                }
+        }
+
+out:
+        loc_wipe (&loc);
+        if (dict)
+                dict_unref (dict);
+        return 0;
+}
+
+int
+dht_heal_full_path_done (int op_ret, call_frame_t *heal_frame, void *data)
+{
+
+        call_frame_t            *main_frame       = NULL;
+        dht_local_t             *local            = NULL;
+
+        local = heal_frame->local;
+        main_frame = local->main_frame;
+        local->main_frame = NULL;
+
+        DHT_STACK_UNWIND (lookup, main_frame, 0, 0,
+                          local->inode, &local->stbuf, local->xattr,
+                          &local->postparent);
+
+        DHT_STACK_DESTROY (heal_frame);
+        return 0;
 }

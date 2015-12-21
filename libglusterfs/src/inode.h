@@ -93,7 +93,7 @@ struct _inode {
         struct list_head     hash;          /* hash table pointers */
         struct list_head     list;          /* active/lru/purge */
 
-	struct _inode_ctx   *_ctx;    /* replacement for dict_t *(inode->ctx) */
+        struct _inode_ctx   *_ctx;    /* replacement for dict_t *(inode->ctx) */
 };
 
 
@@ -272,5 +272,8 @@ inode_set_need_lookup (inode_t *inode, xlator_t *this);
 
 gf_boolean_t
 inode_needs_lookup (inode_t *inode, xlator_t *this);
+
+int
+inode_has_dentry (inode_t *inode);
 
 #endif /* _INODE_H */

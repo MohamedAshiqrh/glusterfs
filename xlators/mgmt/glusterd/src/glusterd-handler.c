@@ -16,6 +16,7 @@
 #include "protocol-common.h"
 #include "xlator.h"
 #include "logging.h"
+#include "syscall.h"
 #include "timer.h"
 #include "defaults.h"
 #include "compat.h"
@@ -43,7 +44,6 @@
 #include <sys/resource.h>
 #include <inttypes.h>
 
-#include "defaults.c"
 #include "common-utils.h"
 
 #include "globals.h"
@@ -307,6 +307,15 @@ _build_option_key (dict_t *d, char *k, data_t *v, void *tmp)
                     (strcmp (k, "features.soft-limit") == 0))
                         return 0;
         }
+
+        /* snap-max-hard-limit and snap-max-soft-limit are system   *
+         * options set and managed by snapshot config option. Hence *
+         * they should not be displayed in gluster volume info.     *
+         */
+        if ((strcmp (k, "snap-max-hard-limit") == 0) ||
+            (strcmp (k, "snap-max-soft-limit") == 0))
+                return 0;
+
         snprintf (reconfig_key, 256, "volume%d.option.%s",
                   pack->vol_count, k);
         ret = dict_set_str (pack->dict, reconfig_key, v->data);
@@ -349,6 +358,12 @@ glusterd_add_tier_volume_detail_to_dict (glusterd_volinfo_t *volinfo,
         snprintf (key, 256, "volume%d.cold_replica_count", count);
         ret = dict_set_int32 (dict, key,
                               volinfo->tier_info.cold_replica_count);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, 256, "volume%d.cold_arbiter_count", count);
+        ret = dict_set_int32 (dict, key, volinfo->arbiter_count);
         if (ret)
                 goto out;
 
@@ -468,6 +483,11 @@ glusterd_add_volume_detail_to_dict (glusterd_volinfo_t *volinfo,
 
         snprintf (key, 256, "volume%d.redundancy_count", count);
         ret = dict_set_int32 (volumes, key, volinfo->redundancy_count);
+        if (ret)
+                goto out;
+
+        snprintf (key, sizeof (key), "volume%d.arbiter_count", count);
+        ret = dict_set_int32 (volumes, key, volinfo->arbiter_count);
         if (ret)
                 goto out;
 
@@ -3216,12 +3236,12 @@ __glusterd_handle_umount (rpcsvc_request_t *req)
         synclock_lock (&priv->big_lock);
         if (rsp.op_ret == 0) {
                 if (realpath (umnt_req.path, mntp))
-                        rmdir (mntp);
+                        sys_rmdir (mntp);
                 else {
                         rsp.op_ret = -1;
                         rsp.op_errno = errno;
                 }
-                if (unlink (umnt_req.path) != 0) {
+                if (sys_unlink (umnt_req.path) != 0) {
                         rsp.op_ret = -1;
                         rsp.op_errno = errno;
                 }
@@ -3291,7 +3311,7 @@ glusterd_rpc_create (struct rpc_clnt **rpc,
         GF_ASSERT (options);
 
         /* TODO: is 32 enough? or more ? */
-        new_rpc = rpc_clnt_new (options, this->ctx, this->name, 16);
+        new_rpc = rpc_clnt_new (options, this, this->name, 16);
         if (!new_rpc)
                 goto out;
 
@@ -3799,15 +3819,16 @@ set_probe_error_str (int op_ret, int op_errno, char *op_errstr, char *errstr,
                         default:
                                 if (op_errno != 0)
                                         snprintf (errstr, len, "Probe returned "
-                                                  "with unknown errno %d",
-                                                  op_errno);
+                                                  "with %s",
+                                                  strerror (op_errno));
                                 break;
                 }
         } else {
                 switch (op_errno) {
                         case GF_PROBE_ANOTHER_CLUSTER:
-                                snprintf (errstr, len, "%s is already part of "
-                                          "another cluster", hostname);
+                                snprintf (errstr, len, "%s is either already "
+                                          "part of another cluster or having "
+                                          "volumes configured", hostname);
                                 break;
 
                         case GF_PROBE_VOLUME_CONFLICT:
@@ -3854,7 +3875,7 @@ set_probe_error_str (int op_ret, int op_errno, char *op_errstr, char *errstr,
 
                         default:
                                 snprintf (errstr, len, "Probe returned with "
-                                          "unknown errno %d", op_errno);
+                                          "%s", strerror (op_errno));
                                 break;
                 }
         }
@@ -3950,7 +3971,7 @@ set_deprobe_error_str (int op_ret, int op_errno, char *op_errstr, char *errstr,
                                 break;
                         default:
                                 snprintf (errstr, len, "Detach returned with "
-                                          "unknown errno %d", op_errno);
+                                          "%s", strerror (op_errno));
                                 break;
 
                 }
@@ -4920,7 +4941,7 @@ glusterd_brick_rpc_notify (struct rpc_clnt *rpc, void *mydata,
 }
 
 int
-glusterd_friend_remove_notify (glusterd_peerctx_t *peerctx)
+glusterd_friend_remove_notify (glusterd_peerctx_t *peerctx, int32_t op_errno)
 {
         int                             ret = -1;
         glusterd_friend_sm_event_t      *new_event = NULL;
@@ -4956,7 +4977,7 @@ glusterd_friend_remove_notify (glusterd_peerctx_t *peerctx)
                         goto out;
                 }
 
-                glusterd_xfer_cli_probe_resp (req, -1, ENOTCONN, errstr,
+                glusterd_xfer_cli_probe_resp (req, -1, op_errno, errstr,
                                               peerinfo->hostname,
                                               peerinfo->port, dict);
 
@@ -4983,6 +5004,7 @@ __glusterd_peer_rpc_notify (struct rpc_clnt *rpc, void *mydata,
         xlator_t             *this        = NULL;
         glusterd_conf_t      *conf        = NULL;
         int                   ret         = 0;
+        int32_t               op_errno    = ENOTCONN;
         glusterd_peerinfo_t  *peerinfo    = NULL;
         glusterd_peerctx_t   *peerctx     = NULL;
         gf_boolean_t         quorum_action = _gf_false;
@@ -5007,12 +5029,17 @@ __glusterd_peer_rpc_notify (struct rpc_clnt *rpc, void *mydata,
 
         peerinfo = glusterd_peerinfo_find_by_generation (peerctx->peerinfo_gen);
         if (!peerinfo) {
-                /* Peerinfo should be available at this point. Not finding it
-                 * means that something terrible has happened
+                /* Peerinfo should be available at this point if its a connect
+                 * event. Not finding it means that something terrible has
+                 * happened. For non-connect event we might end up having a null
+                 * peerinfo, so log at debug level.
                  */
-                gf_msg (THIS->name, GF_LOG_CRITICAL, ENOENT,
+                gf_msg (THIS->name, (RPC_CLNT_CONNECT == event) ?
+                        GF_LOG_CRITICAL : GF_LOG_DEBUG, ENOENT,
                         GD_MSG_PEER_NOT_FOUND, "Could not find peer "
-                        "%s(%s)", peerctx->peername, uuid_utoa (peerctx->peerid));
+                        "%s(%s)", peerctx->peername,
+                        uuid_utoa (peerctx->peerid));
+
                 ret = -1;
                 goto out;
         }
@@ -5070,6 +5097,7 @@ __glusterd_peer_rpc_notify (struct rpc_clnt *rpc, void *mydata,
                                 }
                         }
 
+                        op_errno = GF_PROBE_ANOTHER_CLUSTER;
                         ret = 0;
                 }
 
@@ -5084,7 +5112,7 @@ __glusterd_peer_rpc_notify (struct rpc_clnt *rpc, void *mydata,
                 *  fails, and notify cli. Happens only during probe.
                 */
                 if (peerinfo->state.state == GD_FRIEND_STATE_DEFAULT) {
-                        glusterd_friend_remove_notify (peerctx);
+                        glusterd_friend_remove_notify (peerctx, op_errno);
                         goto out;
                 }
 

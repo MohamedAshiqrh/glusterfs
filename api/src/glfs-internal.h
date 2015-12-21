@@ -84,10 +84,10 @@
         asm(".symver priv_"STR(fn)", "STR(fn)"@@GFAPI_PRIVATE_"STR(ver))
 
 #define GFAPI_SYMVER_PUBLIC(fn1, fn2, ver) \
-        asm(".symver pub_"STR(fn1)", "STR(fn2)"@@GFAPI_"STR(ver))
+        asm(".symver pub_"STR(fn1)", "STR(fn2)"@GFAPI_"STR(ver))
 
 #define GFAPI_SYMVER_PRIVATE(fn1, fn2, ver) \
-        asm(".symver priv_"STR(fn1)", "STR(fn2)"@@GFAPI_PRIVATE_"STR(ver))
+        asm(".symver priv_"STR(fn1)", "STR(fn2)"@GFAPI_PRIVATE_"STR(ver))
 #define STR(str) #str
 #else
 #ifndef GFAPI_PUBLIC
@@ -249,7 +249,6 @@ int glfs_first_lookup (xlator_t *subvol);
 void glfs_process_upcall_event (struct glfs *fs, void *data)
         GFAPI_PRIVATE(glfs_process_upcall_event, 3.7.0);
 
-#define DECLARE_OLD_THIS xlator_t *old_THIS = NULL
 
 #define __GLFS_ENTRY_VALIDATE_FS(fs, label)                         \
 do {                                                                \

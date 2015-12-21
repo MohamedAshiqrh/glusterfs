@@ -186,6 +186,7 @@ AC_CONFIG_FILES([Makefile
                 xlators/mgmt/Makefile
                 xlators/mgmt/glusterd/Makefile
                 xlators/mgmt/glusterd/src/Makefile
+                xlators/experimental/Makefile
                 cli/Makefile
                 cli/src/Makefile
                 doc/Makefile
@@ -211,6 +212,7 @@ AC_CONFIG_FILES([Makefile
                 extras/ocf/volume
                 extras/LinuxRPM/Makefile
                 extras/geo-rep/Makefile
+                extras/firewalld/Makefile
                 extras/hook-scripts/add-brick/Makefile
                 extras/hook-scripts/add-brick/pre/Makefile
                 extras/hook-scripts/add-brick/post/Makefile
@@ -387,6 +389,10 @@ AC_CHECK_HEADERS([sys/ioctl.h], AC_DEFINE(HAVE_IOCTL_IN_SYS_IOCTL_H, 1, [have sy
 
 AC_CHECK_HEADERS([sys/extattr.h])
 
+AC_CHECK_HEADERS([openssl/dh.h])
+
+AC_CHECK_HEADERS([openssl/ecdh.h])
+
 dnl Math library
 AC_CHECK_LIB([m], [pow], [MATH_LIB='-lm'], [MATH_LIB=''])
 AC_SUBST(MATH_LIB)
@@ -416,8 +422,8 @@ AC_SUBST(PKGCONFIG_UUID)
 
 dnl NetBSD does not support POSIX ACLs :-(
 case $host_os in
-     *netbsd*)
-        AC_MSG_WARN([NetBSD does not support POSIX ACLs... disabling them])
+     *netbsd* | darwin*)
+        AC_MSG_WARN([platform does not support POSIX ACLs... disabling them])
         ACL_LIBS=''
         USE_POSIX_ACLS='0'
         BUILD_POSIX_ACLS='no'
@@ -731,6 +737,22 @@ AC_SUBST(ZLIB_CFLAGS)
 AC_SUBST(ZLIB_LIBS)
 # end CDC xlator secion
 
+#start firewalld section
+BUILD_FIREWALLD="no"
+AC_ARG_ENABLE([firewalld],
+              AC_HELP_STRING([--enable-firewalld],
+                             [enable installation configuration for firewalld]),
+              [BUILD_FIREWALLD="${enableval}"], [BUILD_FIREWALLD="no"])
+
+if test "x${BUILD_FIREWALLD}" = "xyes"; then
+        if !(which firewalld 1>/dev/null 2>&1) ; then
+                BUILD_FIREWALLD="no (firewalld not installed)"
+        fi
+fi
+AM_CONDITIONAL([USE_FIREWALLD],test ["x${BUILD_FIREWALLD}" =  "xyes"])
+
+#endof firewald section
+
 # Data tiering requires sqlite
 AC_ARG_ENABLE([tiering],
                AC_HELP_STRING([--disable-tiering],
@@ -757,38 +779,6 @@ AC_SUBST(SQLITE_CFLAGS)
 AC_SUBST(SQLITE_LIBS)
 AM_CONDITIONAL(BUILD_GFDB, test "x${BUILD_GFDB}" = "xyes")
 AM_CONDITIONAL(USE_GFDB, test "x${BUILD_GFDB}" = "xyes")
-
-# check for systemtap/dtrace
-BUILD_SYSTEMTAP=no
-AC_MSG_CHECKING([whether to include systemtap tracing support])
-AC_ARG_ENABLE([systemtap],
-              [AS_HELP_STRING([--enable-systemtap],
-              [Enable inclusion of systemtap trace support])],
-              [ENABLE_SYSTEMTAP="${enableval}"], [ENABLE_SYSTEMTAP="def"])
-
-AM_CONDITIONAL([ENABLE_SYSTEMTAP], [test "x${ENABLE_SYSTEMTAP}" = "xyes"])
-AC_MSG_RESULT(${ENABLE_SYSTEMTAP})
-
-if test "x${ENABLE_SYSTEMTAP}" != "xno"; then
-    AC_CHECK_PROG(DTRACE, dtrace, "yes", "no")
-    AC_CHECK_HEADER([sys/sdt.h], [SDT_H_FOUND="yes"],
-                    [SDT_H_FOUND="no"])
-fi
-
-if test "x${ENABLE_SYSTEMTAP}" = "xyes"; then
-    if test "x${DTRACE}" = "xno"; then
-        AC_MSG_ERROR([dtrace not found])
-    elif test "$x{SDT_H_FOUND}" = "xno"; then
-        AC_MSG_ERROR([systemtap support needs sys/sdt.h header])
-    fi
-fi
-
-if test "x${DTRACE}" = "xyes" -a "x${SDT_H_FOUND}" = "xyes"; then
-    AC_MSG_CHECKING([x"${DTRACE}"xy"${SDT_H_FOUND}"y])
-    AC_DEFINE([HAVE_SYSTEMTAP], [1], [Define to 1 if using  probes.])
-    BUILD_SYSTEMTAP=yes
-fi
-# end of systemtap/dtrace
 
 # xml-output
 AC_ARG_ENABLE([xml-output],
@@ -874,6 +864,17 @@ AC_SUBST(ARGP_STANDALONE_CPPFLAGS)
 AC_SUBST(ARGP_STANDALONE_LDADD)
 AC_SUBST(ARGP_STANDALONE_DIR)
 
+# Check for atomic operation support
+echo -n "checking for atomic operation support... "
+AC_LINK_IFELSE([AC_LANG_SOURCE([[int main() { long int a = 4; __sync_fetch_and_add_8 (&a, 1); }]])],
+                   [have_sync_fetch_and_add_8=yes], [have_sync_fetch_and_add_8=no])
+if test "x${have_sync_fetch_and_add_8}" = "xyes"; then
+  echo "yes"
+  AC_DEFINE(HAVE_ATOMIC_BUILTINS, 1, [have atomic builtins])
+else
+  echo "no"
+fi
+
 AC_CHECK_HEADER([malloc.h], AC_DEFINE(HAVE_MALLOC_H, 1, [have malloc.h]))
 
 AC_CHECK_FUNC([llistxattr], [have_llistxattr=yes])
@@ -933,15 +934,18 @@ fi
 
 dnl check for gcc -Werror=implicit-function-declaration
 saved_CFLAGS=$CFLAGS
+saved_GF_CFLAGS=$GF_CFLAGS
 CFLAGS="-Werror=implicit-function-declaration"
+GF_CFLAGS="-Werror=implicit-function-declaration"
 AC_MSG_CHECKING([whether $CC accepts -Werror=implicit-function-declaration])
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM()], [cc_werror_implicit=yes], [cc_werror_implicit=no])
 echo $cc_werror_implicit
 if test "x$cc_werror_implicit" = "xno"; then
     CFLAGS="$saved_CFLAGS"
+    GF_CFLAGS="$saved_GF_CFLAGS"
 else
     CFLAGS="$saved_CFLAGS $CFLAGS"
-    GF_CFLAGS="$GF_CFLAGS $CFLAGS"
+    GF_CFLAGS="$saved_GF_CFLAGS $GF_CFLAGS"
 fi
 
 dnl clang is mostly GCC-compatible, but its version is much lower,
@@ -1259,8 +1263,22 @@ AC_SUBST(UNITTEST_LDFLAGS)
 AC_SUBST(CFLAGS)
 # end enable debug section
 
+# experimental section
+AC_ARG_ENABLE([experimental],
+              AC_HELP_STRING([--disable-experimental],
+                             [Disable building experimental xlators]))
+
+BUILD_EXPERIMENTAL="yes"
+if test "x$enable_experimental" == "xno"; then
+  BUILD_EXPERIMENTAL="no"
+fi
+AM_CONDITIONAL([ENABLE_EXPERIMENTAL], [test x$BUILD_EXPERIMENTAL = xyes])
+#end experimental section
+
 dnl libglusterfs.so uses math functions
 GF_LDADD="${GF_LDADD} ${MATH_LIB}"
+
+GF_XLATOR_DEFAULT_LDFLAGS='-module -avoid-version -export-symbols $(top_srcdir)/xlators/xlator.sym'
 
 AC_SUBST(GF_HOST_OS)
 AC_SUBST(GF_CFLAGS)
@@ -1272,6 +1290,7 @@ AC_SUBST(RLLIBS)
 AC_SUBST(LIBAIO)
 AC_SUBST(AM_MAKEFLAGS)
 AC_SUBST(AM_LIBTOOLFLAGS)
+AC_SUBST(GF_XLATOR_DEFAULT_LDFLAGS)
 
 CONTRIBDIR='$(top_srcdir)/contrib'
 AC_SUBST(CONTRIBDIR)
@@ -1341,7 +1360,6 @@ echo "readline             : $BUILD_READLINE"
 echo "georeplication       : $BUILD_SYNCDAEMON"
 echo "Linux-AIO            : $BUILD_LIBAIO"
 echo "Enable Debug         : $BUILD_DEBUG"
-## echo "systemtap            : $BUILD_SYSTEMTAP"
 echo "Block Device xlator  : $BUILD_BD_XLATOR"
 echo "glupy                : $BUILD_GLUPY"
 echo "Use syslog           : $USE_SYSLOG"
@@ -1351,4 +1369,6 @@ echo "Encryption xlator    : $BUILD_CRYPT_XLATOR"
 echo "Unit Tests           : $BUILD_UNITTEST"
 echo "POSIX ACLs           : $BUILD_POSIX_ACLS"
 echo "Data Classification  : $BUILD_GFDB"
+echo "firewalld-config     : $BUILD_FIREWALLD"
+echo "Experimental xlators : $BUILD_EXPERIMENTAL"
 echo

@@ -27,10 +27,8 @@ typedef enum {
 
 #define EC_CONFIG_ALGORITHM 0
 
-#define EC_FLAG_UPDATE_LOC_PARENT 0x0001
-#define EC_FLAG_UPDATE_LOC_INODE  0x0002
-#define EC_FLAG_UPDATE_FD         0x0004
-#define EC_FLAG_UPDATE_FD_INODE   0x0008
+#define EC_FLAG_LOCK_SHARED       0x0001
+#define EC_FLAG_WAITING_SIZE      0x0002
 
 #define EC_SELFHEAL_BIT 62
 
@@ -75,14 +73,20 @@ typedef enum {
 #define EC_STATE_HEAL_POST_INODELK_UNLOCK   217
 #define EC_STATE_HEAL_DISPATCH              218
 
-gf_boolean_t ec_dispatch_one_retry (ec_fop_data_t *fop, ec_cbk_data_t *cbk);
+gf_boolean_t ec_dispatch_one_retry (ec_fop_data_t *fop, ec_cbk_data_t **cbk);
 int32_t ec_dispatch_next(ec_fop_data_t * fop, int32_t idx);
 
-void ec_complete(ec_fop_data_t * fop);
+void ec_complete(ec_fop_data_t *fop);
 
-void ec_update_bad(ec_fop_data_t * fop, uintptr_t good);
+void ec_update_good(ec_fop_data_t *fop, uintptr_t good);
 
-void ec_fop_set_error(ec_fop_data_t * fop, int32_t error);
+void ec_fop_set_error(ec_fop_data_t *fop, int32_t error);
+
+ec_cbk_data_t *
+ec_fop_prepare_answer(ec_fop_data_t *fop, gf_boolean_t ro);
+
+gf_boolean_t
+ec_cbk_set_error(ec_cbk_data_t *cbk, int32_t error, gf_boolean_t ro);
 
 void ec_lock_prepare_inode(ec_fop_data_t *fop, loc_t *loc, uint32_t flags);
 void ec_lock_prepare_parent_inode(ec_fop_data_t *fop, loc_t *loc,

@@ -441,7 +441,26 @@ class GMasterCommon(object):
             t.start()
 
     def mgmt_lock(self):
+
         """Take management volume lock """
+        if gconf.mgmt_lock_fd:
+            try:
+                fcntl.lockf(gconf.mgmt_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if not gconf.active_earlier:
+                    gconf.active_earlier = True
+                    logging.info("Got lock : %s : Becoming ACTIVE"
+                                 % gconf.local_path)
+                return True
+            except:
+                ex = sys.exc_info()[1]
+                if isinstance(ex, IOError) and ex.errno in (EACCES, EAGAIN):
+                    if not gconf.passive_earlier:
+                        gconf.passive_earlier = True
+                        logging.info("Didn't get lock : %s : Becoming PASSIVE"
+                                     % gconf.local_path)
+                    return False
+                raise
+
         fd = None
         bname = str(self.uuid) + "_" + str(gconf.slave_id) + "_subvol_" \
             + str(gconf.subvol_num) + ".lock"
@@ -467,16 +486,23 @@ class GMasterCommon(object):
                 raise
         try:
             fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Save latest FD for future use
+            gconf.mgmt_lock_fd = fd
         except:
             ex = sys.exc_info()[1]
-            if fd:
-                os.close(fd)
             if isinstance(ex, IOError) and ex.errno in (EACCES, EAGAIN):
                 # cannot grab, it's taken
-                logging.debug("Lock held by someother worker process")
+                if not gconf.passive_earlier:
+                    gconf.passive_earlier = True
+                    logging.info("Didn't get lock : %s : Becoming PASSIVE"
+                                 % gconf.local_path)
+                gconf.mgmt_lock_fd = fd
                 return False
             raise
-        logging.debug("Got the lock")
+
+        if not gconf.active_earlier:
+            gconf.active_earlier = True
+            logging.info("Got lock : %s : Becoming ACTIVE" % gconf.local_path)
         return True
 
     def should_crawl(self):
@@ -802,6 +828,14 @@ class GMasterChangelogMixin(GMasterCommon):
             et = e[self.IDX_START:self.IDX_END]   # entry type
             ec = e[self.IDX_END:].split(' ')      # rest of the bits
 
+            # skip ENTRY operation if hot tier brick
+            if self.name == 'live_changelog' or \
+                self.name == 'history_changelog':
+                if boolify(gconf.is_hottier) and et == self.TYPE_ENTRY:
+                    logging.debug('skip ENTRY op: %s if hot tier brick'
+                                  % (ec[self.POS_TYPE]))
+                    continue
+
             if et == self.TYPE_ENTRY:
                 # extract information according to the type of
                 # the entry operation. create(), mkdir() and mknod()
@@ -835,16 +869,31 @@ class GMasterChangelogMixin(GMasterCommon):
                     entries.append(edct(ty, gfid=gfid, entry=en,
                                         mode=int(ec[2]),
                                         uid=int(ec[3]), gid=int(ec[4])))
+
+                    # Special case: add DATA in case of tier linkto file,
+                    # Here, we have the assumption that only tier-gfid.linkto
+                    # causes this mknod
+                    if ty in ['MKNOD']:
+                        mode = int(ec[2])
+                        if mode & 01000:
+                            datas.add(os.path.join(pfx, ec[0]))
+
                 elif ty == "RENAME":
                     go = os.path.join(pfx, gfid)
                     st = lstat(go)
                     if isinstance(st, int):
                         st = {}
 
+                    rl = None
+                    if st and stat.S_ISLNK(st.st_mode):
+                        rl = errno_wrap(os.readlink, [en], [ENOENT], [ESTALE])
+                        if isinstance(rl, int):
+                            rl = None
+
                     entry_update()
                     e1 = unescape(os.path.join(pfx, ec[self.POS_ENTRY1 - 1]))
                     entries.append(edct(ty, gfid=gfid, entry=e1, entry1=en,
-                                        stat=st))
+                                        stat=st, link=rl))
                 else:
                     # stat() to get mode and other information
                     go = os.path.join(pfx, gfid)
@@ -887,7 +936,8 @@ class GMasterChangelogMixin(GMasterCommon):
                                                       st_mtime=ec[6])))
                     else:
                         meta_gfid.add((os.path.join(pfx, ec[0]), ))
-                elif ec[1] == 'SETXATTR':
+                elif ec[1] == 'SETXATTR' or ec[1] == 'XATTROP' or \
+                     ec[1] == 'FXATTROP':
                     # To sync xattr/acls use rsync/tar, --xattrs and --acls
                     # switch to rsync and tar
                     if not boolify(gconf.use_tarssh) and \
@@ -979,13 +1029,6 @@ class GMasterChangelogMixin(GMasterCommon):
                 if done:
                     xtl = (int(change.split('.')[-1]) - 1, 0)
                     self.upd_stime(xtl)
-                    chkpt_time = gconf.configinterface.get_realtime(
-                        "checkpoint")
-                    checkpoint_time = 0
-                    if chkpt_time is not None:
-                        checkpoint_time = int(chkpt_time)
-
-                    self.status.set_last_synced(xtl, checkpoint_time)
                     map(self.changelog_done_func, changes)
                     self.archive_and_purge_changelogs(changes)
 
@@ -1013,13 +1056,6 @@ class GMasterChangelogMixin(GMasterCommon):
                 if done:
                     xtl = (int(change.split('.')[-1]) - 1, 0)
                     self.upd_stime(xtl)
-                    chkpt_time = gconf.configinterface.get_realtime(
-                        "checkpoint")
-                    checkpoint_time = 0
-                    if chkpt_time is not None:
-                        checkpoint_time = int(chkpt_time)
-
-                    self.status.set_last_synced(xtl, checkpoint_time)
                     map(self.changelog_done_func, changes)
                     self.archive_and_purge_changelogs(changes)
                 break
@@ -1043,6 +1079,15 @@ class GMasterChangelogMixin(GMasterCommon):
             path = self.FLAT_DIR_HIERARCHY
         if not stime == URXTIME:
             self.sendmark(path, stime)
+
+        # Update last_synced_time in status file based on stime
+        chkpt_time = gconf.configinterface.get_realtime(
+            "checkpoint")
+        checkpoint_time = 0
+        if chkpt_time is not None:
+            checkpoint_time = int(chkpt_time)
+
+        self.status.set_last_synced(stime, checkpoint_time)
 
     def update_worker_remote_node(self):
         node = sys.argv[-1]
@@ -1104,6 +1149,7 @@ class GMasterChangelogMixin(GMasterCommon):
         self.changelog_done_func = self.changelog_agent.done
         self.processed_changelogs_dir = os.path.join(self.setup_working_dir(),
                                                      ".processed")
+        self.name = "live_changelog"
         self.status = status
 
 
@@ -1116,6 +1162,7 @@ class GMasterChangeloghistoryMixin(GMasterChangelogMixin):
         self.history_turns = 0
         self.processed_changelogs_dir = os.path.join(self.setup_working_dir(),
                                                      ".history/.processed")
+        self.name = "history_changelog"
         self.status = status
 
     def crawl(self):
@@ -1123,8 +1170,9 @@ class GMasterChangeloghistoryMixin(GMasterChangelogMixin):
         self.status.set_worker_crawl_status("History Crawl")
         purge_time = self.get_purge_time()
 
-        logging.info('starting history crawl... turns: %s, stime: %s'
-                     % (self.history_turns, repr(purge_time)))
+        end_time = int(time.time())
+        logging.info('starting history crawl... turns: %s, stime: %s, etime: %s'
+                     % (self.history_turns, repr(purge_time), repr(end_time)))
 
         if not purge_time or purge_time == URXTIME:
             logging.info("stime not available, abandoning history crawl")
@@ -1138,7 +1186,7 @@ class GMasterChangeloghistoryMixin(GMasterChangelogMixin):
         ret, actual_end = self.changelog_agent.history(
             changelog_path,
             purge_time[0],
-            self.changelog_register_time,
+            end_time,
             int(gconf.sync_jobs))
 
         # scan followed by getchanges till scan returns zero.
@@ -1209,6 +1257,7 @@ class GMasterXsyncMixin(GMasterChangelogMixin):
         self.tempdir = self.setup_working_dir()
         self.tempdir = os.path.join(self.tempdir, 'xsync')
         self.processed_changelogs_dir = self.tempdir
+        self.name = "xsync"
         logging.info('xsync temp directory: %s' % self.tempdir)
         try:
             os.makedirs(self.tempdir)
@@ -1378,9 +1427,8 @@ class GMasterXsyncMixin(GMasterChangelogMixin):
                 self.sync_done(self.stimes, False)
                 self.stimes = []
             if stat.S_ISDIR(mo):
-                self.write_entry_change("E", [gfid, 'MKDIR', str(mo), str(
-                    st.st_uid), str(st.st_gid), escape(os.path.join(pargfid,
-                                                                    bname))])
+                self.write_entry_change("E", [gfid, 'MKDIR', str(mo),
+                    str(0), str(0), escape(os.path.join(pargfid, bname))])
                 self.write_entry_change("M", [gfid, "SETATTR", str(st.st_uid),
                                               str(st.st_gid), str(st.st_mode),
                                               str(st.st_atime),
@@ -1410,8 +1458,7 @@ class GMasterXsyncMixin(GMasterChangelogMixin):
                 if nlink == 1:
                     self.write_entry_change("E",
                                             [gfid, 'MKNOD', str(mo),
-                                             str(st.st_uid),
-                                             str(st.st_gid),
+                                             str(0), str(0),
                                              escape(os.path.join(
                                                  pargfid, bname))])
                 else:

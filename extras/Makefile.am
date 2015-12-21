@@ -5,7 +5,7 @@ EditorModedir = $(docdir)
 EditorMode_DATA = glusterfs-mode.el glusterfs.vim
 
 SUBDIRS = init.d systemd benchmarking hook-scripts $(OCF_SUBDIR) LinuxRPM \
-          $(GEOREP_EXTRAS_SUBDIR) ganesha snap_scheduler
+          $(GEOREP_EXTRAS_SUBDIR) ganesha snap_scheduler firewalld
 
 confdir = $(sysconfdir)/glusterfs
 conf_DATA = glusterfs-logrotate gluster-rsyslog-7.2.conf gluster-rsyslog-5.8.conf \
@@ -14,7 +14,7 @@ conf_DATA = glusterfs-logrotate gluster-rsyslog-7.2.conf gluster-rsyslog-5.8.con
 voldir = $(sysconfdir)/glusterfs
 vol_DATA = glusterd.vol
 scriptsdir = $(datadir)/glusterfs/scripts
-scripts_DATA = post-upgrade-script-for-quota.sh \
+scripts_SCRIPTS = post-upgrade-script-for-quota.sh \
 	pre-upgrade-script-for-quota.sh stop-all-gluster-processes.sh
 
 EXTRA_DIST = $(conf_DATA) specgen.scm glusterfs-mode.el glusterfs.vim \
@@ -26,10 +26,10 @@ EXTRA_DIST = $(conf_DATA) specgen.scm glusterfs-mode.el glusterfs.vim \
 
 install-data-local:
 	if [ -n "$(tmpfilesdir)" ]; then \
-		$(MKDIR_P) $(DESTDIR)$(tmpfilesdir); \
+		$(mkdir_p) $(DESTDIR)$(tmpfilesdir); \
 		$(INSTALL_DATA) run-gluster.tmpfiles \
 			$(DESTDIR)$(tmpfilesdir)/gluster.conf; \
 	fi
-	$(MKDIR_P) $(DESTDIR)$(GLUSTERD_WORKDIR)/groups
+	$(mkdir_p) $(DESTDIR)$(GLUSTERD_WORKDIR)/groups
 	$(INSTALL_DATA) $(top_srcdir)/extras/group-virt.example \
 		$(DESTDIR)$(GLUSTERD_WORKDIR)/groups/virt

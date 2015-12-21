@@ -49,7 +49,7 @@ typedef int (*afr_changelog_resume_t) (call_frame_t *frame, xlator_t *this);
 #define AFR_COUNT(array,max) ({int __i; int __res = 0; for (__i = 0; __i < max; __i++) if (array[__i]) __res++; __res;})
 #define AFR_INTERSECT(dst,src1,src2,max) ({int __i; for (__i = 0; __i < max; __i++) dst[__i] = src1[__i] && src2[__i];})
 #define AFR_CMP(a1,a2,len) ({int __cmp = 0; int __i; for (__i = 0; __i < len; __i++) if (a1[__i] != a2[__i]) { __cmp = 1; break;} __cmp;})
-
+#define AFR_IS_ARBITER_BRICK(priv, index) ((priv->arbiter_count == 1) && (index == ARBITER_BRICK_INDEX))
 typedef struct _afr_private {
         gf_lock_t lock;               /* to guard access to child_count, etc */
         unsigned int child_count;     /* total number of children   */
@@ -127,6 +127,7 @@ typedef struct _afr_private {
 	gf_boolean_t           use_afr_in_pump;
         gf_boolean_t           consistent_metadata;
         uint64_t               spb_choice_timeout;
+        gf_boolean_t           need_heal;
 } afr_private_t;
 
 
@@ -257,6 +258,7 @@ struct afr_reply {
 	int	valid;
 	int32_t	op_ret;
 	int32_t	op_errno;
+	dict_t *xattr;/*For xattrop*/
 	dict_t *xdata;
 	struct iatt poststat;
 	struct iatt postparent;
@@ -264,7 +266,11 @@ struct afr_reply {
 	struct iatt preparent;
 	struct iatt preparent2;
 	struct iatt postparent2;
+        /* For rchecksum */
 	uint8_t checksum[MD5_DIGEST_LENGTH];
+        gf_boolean_t buf_has_zeroes;
+        /* For lookup */
+        int8_t need_heal;
 };
 
 typedef enum {
@@ -563,11 +569,8 @@ typedef struct _afr_local {
 
                 struct {
                         dict_t *xattr;
+                        gf_xattrop_flags_t optype;
                 } xattrop;
-
-                struct {
-                        dict_t *xattr;
-                } fxattrop;
 
                 /* dir write */
 
@@ -659,11 +662,8 @@ typedef struct _afr_local {
                 dict_t **pre_op_xdata;
                 unsigned char *pre_op_sources;
 
-		/* @fop_subvols: subvolumes on which FOP will be attempted */
-                unsigned char   *fop_subvols;
-
-		/* @failed_subvols: subvolumes on which FOP failed. Always
-		   a subset of @fop_subvols */
+		/* @failed_subvols: subvolumes on which a pre-op or a
+                    FOP failed. */
                 unsigned char   *failed_subvols;
 
 		/* @dirtied: flag which indicates whether we set dirty flag
@@ -729,6 +729,8 @@ typedef struct _afr_local {
         dict_t         *xdata_req;
         dict_t         *xdata_rsp;
 
+        dict_t         *xattr_rsp; /*for [f]xattrop*/
+
         mode_t          umask;
         int             xflag;
         gf_boolean_t    do_discovery;
@@ -749,6 +751,17 @@ typedef struct afr_spbc_timeout {
         loc_t        *loc;
         int          spb_child_index;
 } afr_spbc_timeout_t;
+
+typedef struct afr_spb_status {
+        call_frame_t *frame;
+        loc_t        *loc;
+} afr_spb_status_t;
+
+typedef struct afr_replace_brick_args {
+        call_frame_t *frame;
+        loc_t loc;
+        int rb_index;
+} afr_replace_brick_args_t;
 
 typedef struct afr_read_subvol_args {
         ia_type_t ia_type;
@@ -1045,14 +1058,16 @@ gf_boolean_t
 afr_is_xattr_ignorable (char *key);
 
 int
-afr_get_heal_info (call_frame_t *frame, xlator_t *this, loc_t *loc,
-                   dict_t *xdata);
+afr_get_heal_info (call_frame_t *frame, xlator_t *this, loc_t *loc);
 
 int
 afr_heal_splitbrain_file(call_frame_t *frame, xlator_t *this, loc_t *loc);
 
 int
-afr_get_split_brain_status (call_frame_t *frame, xlator_t *this, loc_t *loc);
+afr_get_split_brain_status (void *opaque);
+
+int
+afr_get_split_brain_status_cbk (int ret, call_frame_t *frame, void *opaque);
 
 int
 afr_inode_split_brain_choice_set (inode_t *inode, xlator_t *this,
@@ -1071,4 +1086,10 @@ afr_spb_choice_timeout_cancel (xlator_t *this, inode_t *inode);
 
 int
 afr_set_split_brain_choice (int ret, call_frame_t *frame, void *opaque);
+
+gf_boolean_t
+afr_get_need_heal (xlator_t *this);
+
+void
+afr_set_need_heal (xlator_t *this, afr_local_t *local);
 #endif /* __AFR_H__ */
